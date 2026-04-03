@@ -1,0 +1,3 @@
+[submodule "external/IC-RAG-Agent"]
+	path = external/IC-RAG-Agent
+	url = git@github.com:lenhop/IC-RAG-Agent.git

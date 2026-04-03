@@ -1,0 +1,244 @@
+# IC-AI-Chat-Client
+
+基于 **FastAPI** 的聊天演示应用：**Gradio** 为主聊天界面（多主题），**Jinja2** 为可选旧版页面。后端统一走 **DeepSeek（OpenAI 兼容 API）** 或 **Ollama**，支持流式多轮对话。
+
+| 能力 | 说明 |
+|------|------|
+| **一体运行** | 同一进程：`Uvicorn` + Gradio + LLM 封装，浏览器即用。 |
+| **Python 集成** | `app.integrations`（`RuntimeConfig` + `stream_chat` / `complete_chat`）；或 `app.ui.gradio_chat.build_gradio_chat_blocks` 挂载同款 UI。 |
+| **不推荐** | 把 `POST /api/chat/stream` 当作对外公共 API（仅供内置页 / 调试）。 |
+
+**文档与计划**：`tasks/m1_plan.md`（M1 总览）· `tasks/m1_plan_v2.md`（Standalone / 路由 / Gradio 挂载）· `tasks/m1_plan_v3.md`（可注入配置、三主题）。
+
+---
+
+## 1. 安装依赖
+
+需要 **Python 3.10+**。
+
+```bash
+cd IC-AI-Chat-Client
+python -m pip install -r requirements.txt
+```
+
+Conda 示例：
+
+```bash
+/opt/miniconda3/bin/python -m pip install -r requirements.txt
+```
+
+主要依赖：`fastapi`、`uvicorn`、`gradio`、`jinja2`、`python-dotenv`、`httpx`、`openai`。Pydantic v2 随 FastAPI 安装。
+
+---
+
+## 2. 配置 `.env`（独立运行必选）
+
+Standalone 模式**仅**加载**仓库根目录**下的 `.env`（不存在则启动失败），不会从上级目录或其它路径回退。
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少按 LLM_BACKEND 填好密钥或 Ollama 地址
+```
+
+### 2.1 LLM 必填项
+
+| `LLM_BACKEND` | 必填环境变量 |
+|---------------|--------------|
+| `deepseek`（默认） | `DEEPSEEK_API_KEY` |
+| `ollama` | `OLLAMA_BASE_URL`、`OLLAMA_GENERATE_MODEL`、`OLLAMA_EMBED_MODEL` |
+
+其它常用项：`DEEPSEEK_LLM_MODEL`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_REQUEST_TIMEOUT`、`OLLAMA_REQUEST_TIMEOUT`、`USER_ID`、`SESSION_ID` 等，见 `.env.example`。
+
+### 2.2 Gradio 界面主题
+
+| 变量 | 说明 |
+|------|------|
+| `GRADIO_UI_THEME` | 可选；**默认** `business`。仅允许：`business`（商务）、`warm`（温馨）、`minimal`（简约）。 |
+| 留空 | 与 `business` 相同。 |
+| 非法值 | 若**显式设置了错误取值**，启动时在 `validate_standalone_env` 阶段 **RuntimeError**。 |
+
+代码中可用 `build_gradio_chat_blocks(theme="warm")` **覆盖**环境变量。
+
+### 2.3 服务监听
+
+`UVICORN_HOST`、`UVICORN_PORT` 由 `scripts/run.py` 读取；直接用 `uvicorn` 命令时也可在命令行指定 `--host` / `--port`。
+
+---
+
+## 3. 部署与准备 Ollama
+
+当 `LLM_BACKEND=ollama` 时需可访问的 **Ollama** 服务（默认 `http://127.0.0.1:11434`）。
+
+1. 从 [ollama.com](https://ollama.com/) 安装并确保 `ollama` 可用。  
+2. 拉取模型示例：`ollama pull qwen3:1.7b`、`ollama pull all-minilm:latest`（与 `.env` 中模型名一致）。  
+3. 自检：`curl -s http://127.0.0.1:11434/api/tags`  
+4. 远程 Ollama：将 `OLLAMA_BASE_URL` 指向可达地址，并放行防火墙。
+
+---
+
+## 4. 运行与访问地址
+
+**前提**：在仓库根目录（或 `PYTHONPATH` 含该根目录）执行，且根目录已有合法 `.env`。
+
+```bash
+python scripts/run.py
+```
+
+或：
+
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+| 地址 | 说明 |
+|------|------|
+| `/` | **302** 重定向到 Gradio。 |
+| `/gradio` | **主聊天界面**（`Chatbot` 为 `type="messages"` 气泡布局）。 |
+| `/legacy` | Jinja2 + 静态资源的旧版页（`POST /api/chat/stream`）。 |
+| `/docs` | FastAPI OpenAPI（若未关闭）。 |
+
+### 场景示例
+
+- **DeepSeek**：`LLM_BACKEND=deepseek` + 有效 `DEEPSEEK_API_KEY`，启动后打开 `/gradio`。  
+- **远程 Ollama**：`OLLAMA_BASE_URL=http://内网IP:11434` + 上述三个 Ollama 必填项。  
+- **换皮肤**：`.env` 中设置 `GRADIO_UI_THEME=warm` 或 `minimal` 后重启。
+
+若 **`Address already in use`**：换端口（如 `8001`）或结束占用该端口的旧 `uvicorn` 进程。
+
+---
+
+## 5. Gradio 三种主题（简要）
+
+| 主题 | 值 | 视觉意图 |
+|------|-----|----------|
+| 商务（默认） | `business` | 蓝灰、卡片化顶栏，偏工作台 / 演示。 |
+| 温馨 | `warm` | 暖色渐变、大圆角，偏轻社区风格。 |
+| 简约 | `minimal` | Gradio 默认主题 + Markdown 顶栏。 |
+
+设计对照图见 `tasks/` 下 `商务风格 *.png`、`温馨风格 *.png`（风格对标，非像素级还原）。
+
+---
+
+## 6. 在外部项目中集成（Python）
+
+### 6.1 LLM 能力：`app.integrations`
+
+不要依赖本仓库 HTTP 作为稳定契约；在宿主进程内：
+
+```text
+RuntimeConfig · validate_runtime_config · normalize_messages · stream_chat · complete_chat
+```
+
+传入 `runtime=RuntimeConfig(...)` 时**仅**使用该配置调用 LLM，**不会** DeepSeek 失败后自动切 Ollama。
+
+**示例：流式（DeepSeek）**
+
+```python
+from app.integrations import RuntimeConfig, normalize_messages, stream_chat
+
+cfg = RuntimeConfig(
+    llm_backend="deepseek",
+    deepseek_api_key="sk-你的密钥",
+    deepseek_llm_model="deepseek-chat",
+)
+messages = normalize_messages([{"role": "user", "content": "用一句话介绍 Python。"}])
+for delta in stream_chat(messages, runtime=cfg):
+    print(delta, end="", flush=True)
+print()
+```
+
+**示例：非流式（Ollama）**
+
+```python
+from app.integrations import RuntimeConfig, normalize_messages, complete_chat
+
+cfg = RuntimeConfig(
+    llm_backend="ollama",
+    ollama_base_url="http://127.0.0.1:11434",
+    ollama_generate_model="qwen3:1.7b",
+    ollama_embed_model="all-minilm:latest",
+)
+messages = normalize_messages(
+    [
+        {"role": "system", "content": "你是一个简洁助手。"},
+        {"role": "user", "content": "1+1等于几？"},
+    ]
+)
+print(complete_chat(messages, runtime=cfg))
+```
+
+### 6.2 同款 Gradio UI：`build_gradio_chat_blocks`
+
+从 `app.ui.gradio_chat` 导入；须先 `load_dotenv` 并调用 `validate_standalone_env()`（或与主应用一致的 env），再 `gr.mount_gradio_app(app, build_gradio_chat_blocks(), path="/gradio")`。
+
+**易错点**
+
+1. **`path=` 与浏览器 URL 一致**：写成 `path="/gradio"` 就访问 `http://host:port/gradio`，不要混用 `/chat`。  
+2. **必须 `uvicorn.run(app, ...)`**（或命令行 uvicorn）；仅创建 `app` 不会监听端口。  
+3. **IPython**：不要依赖 `if __name__ == "__main__"`；在单元末尾**单独执行** `uvicorn.run(...)`。
+
+**最小示例（项目根目录）**
+
+```python
+from pathlib import Path
+
+from dotenv import load_dotenv
+import gradio as gr
+import uvicorn
+from fastapi import FastAPI
+
+load_dotenv(Path.cwd() / ".env")  # IPython 建议改为 .env 的绝对路径
+from app.config import validate_standalone_env
+
+validate_standalone_env()
+
+from app.ui.gradio_chat import build_gradio_chat_blocks
+
+app = FastAPI()
+gr.mount_gradio_app(app, build_gradio_chat_blocks(), path="/gradio")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+```
+
+**可选参数（v3）**
+
+- `theme="warm"` / `"minimal"`：覆盖 `GRADIO_UI_THEME`。  
+- `app_config=AppConfig(...)`：顶栏与校验用配置（不传则用 `get_config()`）。  
+- `runtime=RuntimeConfig(...)`：对话走内存配置，等价于 `stream_chat(..., runtime=...)`。
+
+### 6.3 自建 SSE（思路）
+
+在宿主路由中组装 `messages`，循环 `stream_chat(..., runtime=cfg)`，将每个 `delta` 写成 SSE `data:` 帧即可；密钥勿写进仓库。
+
+---
+
+## 7. 常见问题
+
+| 现象 | 处理 |
+|------|------|
+| 缺少 `.env` | 从 `.env.example` 复制到仓库根目录。 |
+| `Standalone .env is missing required variables` | 按 `LLM_BACKEND` 补全 §2.1 表内变量。 |
+| `GRADIO_UI_THEME` 报错 | 仅允许 `business`、`warm`、`minimal`（大小写不敏感）。 |
+| Ollama 连不上 | 检查 `OLLAMA_BASE_URL`、服务是否运行、`ollama pull` 与网络。 |
+| Gradio **404** | 访问路径须与 `mount_gradio_app(..., path=...)` 一致。 |
+| 端口被占用 | 换 `UVICORN_PORT` 或 `kill` 占用该端口的进程。 |
+
+---
+
+## 8. 仓库结构（速览）
+
+```text
+app/
+  main.py              # FastAPI 入口、挂载 Gradio / 静态资源 / 路由
+  config.py            # AppConfig、validate_standalone_env、get_gradio_ui_theme
+  integrations.py        # 对外 LLM 稳定导出
+  runtime_config.py      # RuntimeConfig（库集成）
+  ui/
+    gradio_chat.py       # build_gradio_chat_blocks(...)
+    gradio_themes.py     # business / warm / minimal 主题
+  routes/                # chat_pages（/ 与 /legacy）、chat_stream（SSE）
+  services/              # call_llm、call_deepseek、call_ollama
+scripts/run.py           # 开发启动（reload）
+tasks/                   # 设计文档与 UI 参考图
+```
