@@ -16,6 +16,8 @@ from typing import Dict, Iterator, List, Optional
 
 from openai import OpenAI
 
+from app.services.llm_chunks import ChatStreamChunk
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,15 +120,20 @@ class DeepSeekClient:
             logger.error("DeepSeek completion failed: %s", exc, exc_info=True)
             raise RuntimeError(f"DeepSeek request failed: {exc}") from exc
 
-    def stream_chat(
+    def stream_chat_chunks(
         self,
         messages: List[Dict[str, str]],
         *,
         model_override: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 1024,
-    ) -> Iterator[str]:
-        """Yield assistant token deltas from DeepSeek streaming API."""
+    ) -> Iterator[ChatStreamChunk]:
+        """
+        Stream OpenAI-compatible chunks mapped to :class:`ChatStreamChunk`.
+
+        Emits ``content_delta`` / optional ``reasoning_delta``, then a final
+        ``done=True`` chunk when the HTTP stream completes without error.
+        """
         client, cfg = self._client()
         model = (model_override or "").strip() or cfg.llm_model
         try:
@@ -142,9 +149,37 @@ class DeepSeekClient:
                 if not choices:
                     continue
                 delta = getattr(choices[0], "delta", None)
-                text = getattr(delta, "content", None) if delta is not None else None
+                if delta is None:
+                    continue
+                # Visible assistant text (standard chat models).
+                text = getattr(delta, "content", None)
                 if text:
-                    yield str(text)
+                    yield ChatStreamChunk(content_delta=str(text))
+                # Optional reasoning stream (some OpenAI-compatible / reasoning models).
+                reasoning = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if reasoning:
+                    yield ChatStreamChunk(reasoning_delta=str(reasoning))
+            yield ChatStreamChunk(done=True)
         except Exception as exc:
             logger.error("DeepSeek stream failed: %s", exc, exc_info=True)
             raise RuntimeError(f"DeepSeek stream failed: {exc}") from exc
+
+    def stream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        model_override: Optional[str] = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        """Yield assistant token deltas from DeepSeek streaming API."""
+        for ch in self.stream_chat_chunks(
+            messages,
+            model_override=model_override,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            if ch.content_delta:
+                yield ch.content_delta

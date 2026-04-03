@@ -16,6 +16,8 @@ from typing import Dict, Iterator, List, Optional
 
 import httpx
 
+from app.services.llm_chunks import ChatStreamChunk
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,18 +139,17 @@ class OllamaClient:
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Ollama invalid embed response: {exc}") from exc
 
-    def stream_chat(
+    def stream_chat_chunks(
         self,
         messages: List[Dict[str, str]],
         *,
         model_override: Optional[str] = None,
-    ) -> Iterator[str]:
+    ) -> Iterator[ChatStreamChunk]:
         """
-        Stream chat token deltas from Ollama /api/chat.
+        Stream Ollama /api/chat NDJSON lines as :class:`ChatStreamChunk`.
 
-        Note:
-            Some Ollama versions return cumulative content, some return incremental
-            chunks. We normalize to deltas by tracking the accumulated output.
+        Normalizes cumulative vs incremental ``message.content`` to true deltas,
+        then emits ``done=True`` after a successful stream.
         """
         cfg = self._resolve_config()
         url = f"{cfg.base_url}/api/chat"
@@ -173,14 +174,12 @@ class OllamaClient:
                             break
 
                         message = obj.get("message") or {}
-                        # Keep raw text (including spaces/newlines) for faithful incremental rendering.
                         piece = message.get("content") or ""
                         if not piece:
                             continue
 
-                        # Key normalization: convert cumulative content into true deltas.
                         if accumulated and piece.startswith(accumulated):
-                            delta = piece[len(accumulated):]
+                            delta = piece[len(accumulated) :]
                             accumulated = piece
                         elif not accumulated:
                             delta = piece
@@ -189,7 +188,8 @@ class OllamaClient:
                             delta = piece
                             accumulated += piece
                         if delta:
-                            yield delta
+                            yield ChatStreamChunk(content_delta=delta)
+            yield ChatStreamChunk(done=True)
         except httpx.HTTPStatusError as exc:
             detail = self._extract_error_body(exc.response)
             raise RuntimeError(detail or f"Ollama HTTP {exc.response.status_code}") from exc
@@ -197,6 +197,21 @@ class OllamaClient:
             raise RuntimeError(
                 "Cannot reach Ollama. Check OLLAMA_BASE_URL and that ollama serve is running."
             ) from exc
+
+    def stream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        model_override: Optional[str] = None,
+    ) -> Iterator[str]:
+        """
+        Stream chat token deltas from Ollama /api/chat.
+
+        Delegates to :meth:`stream_chat_chunks` and yields text deltas only.
+        """
+        for ch in self.stream_chat_chunks(messages, model_override=model_override):
+            if ch.content_delta:
+                yield ch.content_delta
 
     @staticmethod
     def _extract_error_body(response: Optional[httpx.Response]) -> str:

@@ -5,10 +5,12 @@
 | 能力 | 说明 |
 |------|------|
 | **一体运行** | 同一进程：`Uvicorn` + Gradio + LLM 封装，浏览器即用。 |
-| **Python 集成** | `app.integrations`（`RuntimeConfig` + `stream_chat` / `complete_chat`）；或 `app.ui.gradio_chat.build_gradio_chat_blocks` 挂载同款 UI。 |
+| **Python 集成** | `app.integrations`（`RuntimeConfig`、`stream_chat`、`stream_chat_chunks`、`list_chat_model_names`、`complete_chat`）；或 `app.ui.gradio_chat.build_gradio_chat_blocks` 挂载同款 UI。 |
 | **不推荐** | 把 `POST /api/chat/stream` 当作对外公共 API（仅供内置页 / 调试）。 |
 
-**文档与计划**：`tasks/m1_plan.md`（M1 总览）· `tasks/m1_plan_v2.md`（Standalone / 路由 / Gradio 挂载）· `tasks/m1_plan_v3.md`（可注入配置、三主题）。
+**文档与计划**：`tasks/project_goal.md`（总目标与里程碑）· `tasks/m1_plan.md` · `tasks/m1_plan_v2.md` · `tasks/m1_plan_v3.md` · **`tasks/m2_plan.md`（M2：chunk 抽象、模型列表、无 Redis）**。
+
+**里程碑（摘要）**：M1 已交付 **FastAPI + Gradio/Jinja + DeepSeek/Ollama**；M2 为 **`ChatStreamChunk` / `stream_chat_chunks`**、**`list_chat_model_names`**（Ollama 拉 tags，DeepSeek 返回当前配置模型）及生产说明；**M3** 起 Redis；**M4** Route/Dispatcher 时间线（见 `project_goal.md` §4）。
 
 ---
 
@@ -126,8 +128,13 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 不要依赖本仓库 HTTP 作为稳定契约；在宿主进程内：
 
 ```text
-RuntimeConfig · validate_runtime_config · normalize_messages · stream_chat · complete_chat
+RuntimeConfig · validate_runtime_config · normalize_messages
+stream_chat · stream_chat_chunks · ChatStreamChunk · complete_chat · list_chat_model_names
 ```
+
+- **`stream_chat`**：仅拼接助手可见正文（`content_delta`），与 Gradio/SSE 行为一致。  
+- **`stream_chat_chunks`**：结构化块（含可选 `reasoning_delta`、结束标记 `done`）。  
+- **`list_chat_model_names`**：Ollama 使用 `GET /api/tags`；DeepSeek 无列举 API 时返回当前配置的单个模型 id。
 
 传入 `runtime=RuntimeConfig(...)` 时**仅**使用该配置调用 LLM，**不会** DeepSeek 失败后自动切 Ollama。
 
@@ -226,19 +233,39 @@ if __name__ == "__main__":
 
 ---
 
-## 8. 仓库结构（速览）
+## 8. 生产部署与安全
+
+- **密钥与模型 Key**：`DEEPSEEK_API_KEY` 等**仅**存在于服务端环境变量或密钥管理系统；**不要**下发到浏览器或打包进前端。本应用由 FastAPI **代为请求** DeepSeek/Ollama，浏览器只访问同源 ASGI。
+- **访问控制**：公网部署时应在 **反向代理 / API 网关** 上配置认证、限流与 TLS；勿依赖 `.env` 里的 `USER_ID` 作为多租户安全边界（见 `project_goal.md` §2.4）。
+- **多进程（示例）**：在 Linux 上可用 Gunicorn + Uvicorn worker（需 `pip install gunicorn`），例如：
+  ```bash
+  gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000
+  ```
+  开发阶段仍推荐 `uvicorn app.main:app --reload`。Worker 数与超时需按 LLM 流式耗时调整。
+- **健康检查**：可对外暴露 FastAPI 自带 `GET /docs` 或自建 `/health`（按需添加路由）。
+- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（M2 chunk / 模型列表逻辑）。
+
+---
+
+## 9. 仓库结构（速览）
 
 ```text
 app/
   main.py              # FastAPI 入口、挂载 Gradio / 静态资源 / 路由
   config.py            # AppConfig、validate_standalone_env、get_gradio_ui_theme
-  integrations.py        # 对外 LLM 稳定导出
-  runtime_config.py      # RuntimeConfig（库集成）
+  integrations.py      # 对外 LLM 稳定导出
+  runtime_config.py    # RuntimeConfig（库集成）
   ui/
     gradio_chat.py       # build_gradio_chat_blocks(...)
     gradio_themes.py     # business / warm / minimal 主题
   routes/                # chat_pages（/ 与 /legacy）、chat_stream（SSE）
-  services/              # call_llm、call_deepseek、call_ollama
+  services/
+    call_llm.py          # stream_chat、stream_chat_chunks、路由与回落
+    call_deepseek.py     # DeepSeek 客户端
+    call_ollama.py       # Ollama 客户端
+    llm_chunks.py        # ChatStreamChunk（M2）
+    llm_models.py        # list_chat_model_names（M2）
 scripts/run.py           # 开发启动（reload）
-tasks/                   # 设计文档与 UI 参考图
+tests/                   # unittest（如 test_llm_chunks.py）
+tasks/                   # 设计文档、里程碑、参考图
 ```

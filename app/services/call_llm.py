@@ -13,6 +13,7 @@ from typing import Dict, Iterator, List, Optional
 from app.runtime_config import RuntimeConfig, validate_runtime_config
 from app.services.call_deepseek import DeepSeekClient, DeepSeekConfig
 from app.services.call_ollama import OllamaClient, OllamaConfig
+from app.services.llm_chunks import ChatStreamChunk, iter_text_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -71,33 +72,29 @@ def normalize_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return normalized
 
 
-def stream_chat(
+def stream_chat_chunks(
     messages: List[Dict[str, str]],
     *,
     backend: Optional[str] = None,
     model_override: Optional[str] = None,
     runtime: Optional[RuntimeConfig] = None,
-) -> Iterator[str]:
+) -> Iterator[ChatStreamChunk]:
     """
-    Stream assistant deltas using selected backend.
+    Stream structured chunks (content / reasoning / done) for the active backend.
 
-    Args:
-        messages: Standard chat message list.
-        backend: Optional explicit backend label from request (ignored if ``runtime`` is set).
-        model_override: Optional model name for one-shot override.
-        runtime: If set, use in-process config only (no ``os.environ``); no DeepSeek->Ollama fallback.
+    Same routing and DeepSeek->Ollama fallback semantics as :func:`stream_chat`.
     """
     normalized = normalize_messages(messages)
 
     if runtime is not None:
         validate_runtime_config(runtime)
         if runtime.llm_backend == "deepseek":
-            yield from DeepSeekClient(config=_runtime_to_deepseek(runtime)).stream_chat(
+            yield from DeepSeekClient(config=_runtime_to_deepseek(runtime)).stream_chat_chunks(
                 normalized,
                 model_override=model_override,
             )
             return
-        yield from OllamaClient(config=_runtime_to_ollama(runtime)).stream_chat(
+        yield from OllamaClient(config=_runtime_to_ollama(runtime)).stream_chat_chunks(
             normalized,
             model_override=model_override,
         )
@@ -106,9 +103,8 @@ def stream_chat(
     target = _normalize_backend(backend)
 
     if target == "deepseek":
-        # Main path for cloud model; falls back to ollama when DeepSeek config is missing.
         try:
-            yield from DeepSeekClient().stream_chat(
+            yield from DeepSeekClient().stream_chat_chunks(
                 normalized,
                 model_override=model_override,
             )
@@ -121,13 +117,35 @@ def stream_chat(
             target = "ollama"
 
     if target == "ollama":
-        yield from OllamaClient().stream_chat(
+        yield from OllamaClient().stream_chat_chunks(
             normalized,
             model_override=model_override,
         )
         return
 
     raise ValueError(f"Unsupported backend: {target}")
+
+
+def stream_chat(
+    messages: List[Dict[str, str]],
+    *,
+    backend: Optional[str] = None,
+    model_override: Optional[str] = None,
+    runtime: Optional[RuntimeConfig] = None,
+) -> Iterator[str]:
+    """
+    Stream assistant text deltas using selected backend (concatenation of ``content_delta``).
+
+    Implemented as a thin wrapper over :func:`stream_chat_chunks`.
+    """
+    yield from iter_text_deltas(
+        stream_chat_chunks(
+            messages,
+            backend=backend,
+            model_override=model_override,
+            runtime=runtime,
+        )
+    )
 
 
 def complete_chat(
