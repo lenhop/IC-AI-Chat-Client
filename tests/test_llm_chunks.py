@@ -36,6 +36,8 @@ class TestListDeepseekModels(unittest.TestCase):
         cfg = AppConfig(
             user_id="u",
             session_id="",
+            memory_rounds=3,
+            chat_mode="messages",
             llm_backend="deepseek",
             ollama_base_url="http://localhost:11434",
             ollama_generate_model="m",
@@ -52,6 +54,8 @@ class TestListDeepseekModels(unittest.TestCase):
         cfg = AppConfig(
             user_id="u",
             session_id="",
+            memory_rounds=3,
+            chat_mode="messages",
             llm_backend="deepseek",
             ollama_base_url="http://localhost:11434",
             ollama_generate_model="m",

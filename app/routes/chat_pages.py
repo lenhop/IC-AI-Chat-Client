@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.config import get_config
+from app.config import get_config, get_redis_settings
 
 router = APIRouter()
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
@@ -36,5 +36,6 @@ async def legacy_chat_page(request: Request) -> HTMLResponse:
             "model_name": cfg.deepseek_llm_model if cfg.llm_backend == "deepseek" else cfg.ollama_generate_model,
             "user_id": cfg.user_id,
             "backend_name": cfg.llm_backend,
+            "redis_sessions_enabled": get_redis_settings().enabled,
         },
     )

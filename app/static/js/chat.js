@@ -1,5 +1,8 @@
 /**
- * M1 chat client: maintains messages[], POSTs to /api/chat/stream, parses SSE.
+ * M1/M3 chat client: maintains messages[], POSTs to /api/chat/stream, parses SSE.
+ *
+ * M3: when data-redis-sessions=true, sessionStorage holds icai_legacy_session_id;
+ * POST /api/sessions + GET messages hydrate history; stream body includes session_id.
  *
  * Input: user textarea + send button.
  * Output: appends user/assistant bubbles; streams assistant text via SSE frames.
@@ -13,9 +16,16 @@
   const sendBtn = document.getElementById("btn-send");
   const stopBtn = document.getElementById("btn-stop");
   const bannerEl = document.getElementById("banner");
+  const appRoot = document.querySelector(".app");
+  const redisSessions =
+    appRoot && appRoot.getAttribute("data-redis-sessions") === "true";
+  const SESSION_STORAGE_KEY = "icai_legacy_session_id";
 
   /** @type {{ role: string, content: string }[]} */
   let messages = [];
+
+  /** @type {string|null} */
+  let sessionId = null;
 
   let abortController = null;
 
@@ -97,6 +107,72 @@
   }
 
   /**
+   * Allocate a server session id (Redis-backed).
+   * @returns {Promise<string>}
+   */
+  async function createSessionFromApi() {
+    const res = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) {
+      throw new Error("创建会话失败 (" + res.status + ")");
+    }
+    const data = await res.json();
+    if (!data.session_id) {
+      throw new Error("会话响应缺少 session_id");
+    }
+    return String(data.session_id);
+  }
+
+  /**
+   * Ensure legacy session id and render stored messages (M3).
+   * @returns {Promise<void>}
+   */
+  async function bootstrapRedisSession() {
+    if (!redisSessions) {
+      return;
+    }
+    try {
+      let sid = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!sid) {
+        sid = await createSessionFromApi();
+        sessionStorage.setItem(SESSION_STORAGE_KEY, sid);
+      }
+      sessionId = sid;
+      let msgRes = await fetch(
+        "/api/sessions/" + encodeURIComponent(sid) + "/messages"
+      );
+      if (msgRes.status === 404 || msgRes.status === 403) {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        sid = await createSessionFromApi();
+        sessionStorage.setItem(SESSION_STORAGE_KEY, sid);
+        sessionId = sid;
+        msgRes = await fetch(
+          "/api/sessions/" + encodeURIComponent(sid) + "/messages"
+        );
+      }
+      if (!msgRes.ok) {
+        throw new Error("加载历史失败 (" + msgRes.status + ")");
+      }
+      const msgData = await msgRes.json();
+      const list = msgData.messages || [];
+      messages = list.slice();
+      messagesEl.innerHTML = "";
+      for (let i = 0; i < list.length; i += 1) {
+        const m = list[i];
+        if (m.role === "user" || m.role === "assistant") {
+          appendBubble(m.role, m.content || "");
+        }
+      }
+    } catch (err) {
+      console.warn("bootstrapRedisSession", err);
+      const m = err && err.message ? err.message : String(err);
+      showBanner(m, true);
+    }
+  }
+
+  /**
    * Send current input and stream assistant reply.
    */
   async function sendMessage() {
@@ -118,11 +194,16 @@
     stopBtn.disabled = false;
     abortController = new AbortController();
 
+    const payload = { messages: messages.slice(0, -1) };
+    if (sessionId) {
+      payload.session_id = sessionId;
+    }
+
     try {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: messages.slice(0, -1) }),
+        body: JSON.stringify(payload),
         signal: abortController.signal,
       });
 
@@ -195,4 +276,6 @@
       }
     }
   });
+
+  bootstrapRedisSession();
 })();

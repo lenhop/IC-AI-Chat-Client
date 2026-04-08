@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/css/chat.css" />
 </head>
 <body>
-  <div class="app">
+  <div class="app" data-redis-sessions="{{ 'true' if redis_sessions_enabled else 'false' }}">
     <header class="topbar">
       <h1 class="title">IC AI Chat</h1>
       <div class="meta">
