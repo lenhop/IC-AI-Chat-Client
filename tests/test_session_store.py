@@ -4,11 +4,12 @@ Unit tests for M3 Redis session store (fakeredis, no real server).
 
 from __future__ import annotations
 
+import json
 import unittest
 
 import fakeredis
 
-from app.config import RedisSettings
+from app.config import MessageDisplayOptions, RedisSettings
 from app.memory.session_store import (
     SessionAccessDeniedError,
     SessionNotFoundError,
@@ -17,6 +18,7 @@ from app.memory.session_store import (
     messages_for_openai_payload,
     normalize_stored_message,
 )
+
 
 def _fake_settings() -> RedisSettings:
     return RedisSettings(
@@ -40,6 +42,15 @@ class SessionStoreTests(unittest.TestCase):
         msgs = self._store.get_messages(sid, "u1")
         self.assertEqual(msgs, [])
 
+    def test_append_turn_with_explicit_turn_id(self) -> None:
+        """Optional turn_id keeps query/answer on one id (Gradio pre-persist path)."""
+        sid = self._store.create_session("u1", "deepseek")
+        fixed = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self._store.append_turn(sid, "u1", "q", "a", turn_id=fixed)
+        raw = self._store.get_messages(sid, "u1")
+        self.assertEqual(raw[0].get("turn_id"), fixed)
+        self.assertEqual(raw[1].get("turn_id"), fixed)
+
     def test_append_turn_round_trip(self) -> None:
         sid = self._store.create_session("u1", "ollama")
         self._store.append_turn(sid, "u1", "hello", "world")
@@ -58,17 +69,94 @@ class SessionStoreTests(unittest.TestCase):
         gradio_rows = gradio_history_from_stored(raw)
         self.assertEqual(len(gradio_rows), 2)
 
-    def test_legacy_normalize_role_based(self) -> None:
-        sid = "s-leg"
+    def test_legacy_role_based_skipped_in_get_messages(self) -> None:
+        """Option B: role/ts rows are not normalized and are dropped on read."""
+        sid = self._store.create_session("u1", "deepseek")
+        msg_k = f"test:session:{sid}:messages"
+        legacy = json.dumps({"role": "user", "content": "old", "ts": 1700000000})
+        self._client.rpush(msg_k, legacy)
+        msgs = self._store.get_messages(sid, "u1")
+        self.assertEqual(msgs, [])
+
+    def test_normalize_requires_type_and_timestamp(self) -> None:
+        self.assertIsNone(normalize_stored_message({"content": "x"}, "s", "u"))
+        self.assertIsNone(
+            normalize_stored_message(
+                {"type": "query", "content": "x"},
+                "s",
+                "u",
+            )
+        )
         n = normalize_stored_message(
-            {"role": "user", "content": "hi", "ts": 1700000000},
-            sid,
+            {
+                "type": "query",
+                "content": "hi",
+                "timestamp": "2020-01-01 00:00:00 UTC",
+            },
+            "s1",
             "u1",
         )
         self.assertIsNotNone(n)
         assert n is not None
         self.assertEqual(n["type"], "query")
-        self.assertEqual(n["content"], "hi")
+        self.assertEqual(n["user_id"], "u1")
+        self.assertEqual(n["session_id"], "s1")
+
+    def test_append_memory_message_round_trip(self) -> None:
+        sid = self._store.create_session("u1", "deepseek")
+        self._store.append_memory_message(
+            sid,
+            "u1",
+            message_type="plan",
+            content="do things",
+        )
+        msgs = self._store.get_messages(sid, "u1")
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0]["type"], "plan")
+        self.assertEqual(msgs[0]["content"], "do things")
+
+    def test_gradio_history_honors_display_off(self) -> None:
+        msgs = [
+            {
+                "user_id": "u",
+                "session_id": "s",
+                "type": "query",
+                "content": "q",
+                "timestamp": "t",
+                "turn_id": "",
+            },
+            {
+                "user_id": "u",
+                "session_id": "s",
+                "type": "plan",
+                "content": "hidden",
+                "timestamp": "t",
+                "turn_id": "",
+            },
+            {
+                "user_id": "u",
+                "session_id": "s",
+                "type": "answer",
+                "content": "a",
+                "timestamp": "t",
+                "turn_id": "",
+            },
+        ]
+        off = MessageDisplayOptions(
+            clarification_message_display_enable=True,
+            rewriting_message_display_enable=True,
+            classification_message_display_enable=True,
+            plan_message_display_enable=False,
+            reason_message_display_enable=True,
+            context_message_display_enable=True,
+            dispatcher_message_display_enable=True,
+        )
+        rows = gradio_history_from_stored(msgs, off)
+        roles = [r["role"] for r in rows]
+        self.assertIn("user", roles)
+        self.assertIn("assistant", roles)
+        combined = " ".join(str(r.get("content", "")) for r in rows)
+        self.assertNotIn("hidden", combined)
 
     def test_wrong_user_denied(self) -> None:
         sid = self._store.create_session("owner", "deepseek")

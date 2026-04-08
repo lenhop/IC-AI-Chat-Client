@@ -1,5 +1,5 @@
 """
-Gradio chat UI backed by ``call_llm.stream_chat`` (same contract as SSE route).
+Gradio chat UI backed by ``llm_transport.iter_chat_text_deltas`` (same contract as SSE route).
 
 Mount with ``gr.mount_gradio_app(fastapi_app, blocks, path="/gradio")``.
 Supports injectable ``AppConfig``, optional ``RuntimeConfig`` for LLM calls,
@@ -15,12 +15,13 @@ and ``{current_query}`` (not ``app.integrations``).
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Dict, Generator, List, Optional, Tuple, cast
 
 import gradio as gr
 
-from app.config import AppConfig, get_config, get_gradio_ui_theme, validate_app_config_for_ui
+from app.config import AppConfig, MessageDisplayOptions, get_config, get_gradio_ui_theme, validate_app_config_for_ui
 from app.memory.redis_runtime import get_redis_for_gradio
 from app.memory.session_store import (
     SessionAccessDeniedError,
@@ -29,13 +30,15 @@ from app.memory.session_store import (
     gradio_history_from_stored,
 )
 from app.runtime_config import RuntimeConfig, validate_runtime_config
-from app.services.call_llm import normalize_messages, stream_chat
+from app.services.call_llm import normalize_messages
+from app.services.llm_transport import iter_chat_text_deltas
 from app.services.prompt_render import (
     format_messages_markdown_for_prompt,
     render_chat_prompt,
     select_rounds_for_prompt,
     select_rounds_for_ui,
 )
+from app.ui.gradio_session_turn import GradioSessionTurn
 from app.ui.gradio_themes import (
     GradioUiTheme,
     build_gradio_theme,
@@ -96,7 +99,7 @@ def build_gradio_chat_blocks(
     Args:
         app_config: If ``None``, uses ``get_config()`` from environment.
         theme: ``business`` | ``warm`` | ``minimal``; overrides ``GRADIO_UI_THEME`` when set.
-        runtime: If set, ``stream_chat(..., runtime=...)`` and skip env-based LLM config for calls.
+        runtime: If set, ``iter_chat_text_deltas(..., runtime=...)`` uses in-process LLM only.
 
     Returns:
         Configured ``gr.Blocks`` with ``Chatbot(type='messages')`` and streaming callbacks.
@@ -131,51 +134,98 @@ def build_gradio_chat_blocks(
                     if resolved_cfg.memory_rounds > 0
                     else raw_msgs
                 )
-                return sid, gradio_history_from_stored(display)
+                return sid, gradio_history_from_stored(
+                    display,
+                    MessageDisplayOptions.from_app_config(resolved_cfg),
+                )
             except (SessionNotFoundError, SessionAccessDeniedError):
                 if sess is not None:
                     sess.pop(_GRADIO_SESSION_KEY, None)
         new_sid = store.create_session(resolved_cfg.user_id, resolved_cfg.llm_backend)
         if sess is not None:
             sess[_GRADIO_SESSION_KEY] = new_sid
+            GradioSessionTurn.clear_active_turn_id(sess)
         return new_sid, []
 
-    def _persist_gradio_turn(
+    def _persist_answer_after_stream(
         session_id: Optional[str],
-        history_list: List[Dict[str, Any]],
+        request: gr.Request,
         assistant_text: str,
     ) -> None:
-        """Best-effort Redis append after a successful streamed turn."""
-        if not session_id:
+        """
+        Append ``answer`` for the active Starlette ``turn_id`` and clear that turn.
+
+        Query rows are written in ``_user_turn``; failures here are logged only.
+        """
+        text = (assistant_text or "").strip()
+        if not session_id or not text:
             return
         client, rs = get_redis_for_gradio()
         if rs is None or not rs.enabled or client is None:
             return
-        user_text = ""
-        if len(history_list) >= 2:
-            candidate = history_list[-2]
-            if candidate.get("role") == "user":
-                user_text = (str(candidate.get("content") or "")).strip()
-        if not user_text:
+        sess = _starlette_session_from_gradio(request)
+        turn_id = GradioSessionTurn.get_active_turn_id(sess)
+        if not turn_id:
             return
         try:
             store = SessionStore(client, rs)
-            store.append_turn(str(session_id), resolved_cfg.user_id, user_text, assistant_text)
+            store.append_memory_message(
+                str(session_id),
+                resolved_cfg.user_id,
+                message_type="answer",
+                content=text,
+                turn_id=turn_id,
+            )
+            GradioSessionTurn.clear_active_turn_id(sess)
         except SessionNotFoundError:
-            logger.warning("gradio redis persist: session not found %s", session_id)
+            logger.warning("gradio redis persist answer: session not found %s", session_id)
         except SessionAccessDeniedError:
-            logger.warning("gradio redis persist: access denied %s", session_id)
+            logger.warning("gradio redis persist answer: access denied %s", session_id)
+        except ValueError as exc:
+            logger.warning("gradio redis persist answer: %s", exc)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("gradio redis persist failed: %s", exc)
+            logger.warning("gradio redis persist answer failed: %s", exc)
 
-    def _user_turn(message: str, history: Any, session_id: Any) -> Tuple[str, Any, Any]:
+    def _user_turn(
+        message: str,
+        history: Any,
+        session_id: Any,
+        request: gr.Request,
+    ) -> Tuple[str, Any, Any]:
         history_list = _clone_message_history(history)
         text = (message or "").strip()
         if not text:
             return "", history_list, session_id
+
+        client, rs = get_redis_for_gradio()
+        sid = session_id
+        if sid and client and rs is not None and rs.enabled:
+            sess = _starlette_session_from_gradio(request)
+            try:
+                turn_id = GradioSessionTurn.ensure_active_turn_id(sess)
+                SessionStore(client, rs).append_memory_message(
+                    str(sid),
+                    resolved_cfg.user_id,
+                    message_type="query",
+                    content=text,
+                    turn_id=turn_id,
+                )
+            except SessionNotFoundError:
+                logger.warning("gradio redis persist query: session not found %s", sid)
+            except SessionAccessDeniedError:
+                logger.warning("gradio redis persist query: access denied %s", sid)
+            except ValueError as exc:
+                logger.warning("gradio redis persist query: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("gradio redis persist query failed: %s", exc)
+
         return "", history_list + [{"role": "user", "content": text}], session_id
 
-    def _stream_assistant(history: Any, session_id: Any) -> Generator[Any, None, None]:
+    def _stream_assistant(
+        history: Any,
+        session_id: Any,
+        request: gr.Request,
+    ) -> Generator[Any, None, None]:
         history_list = _clone_message_history(history)
         if not history_list or history_list[-1].get("role") != "user":
             yield _clone_message_history(history_list)
@@ -217,11 +267,11 @@ def build_gradio_chat_blocks(
             stream_kw["runtime"] = runtime
 
         try:
-            for delta in stream_chat(**stream_kw):
+            for delta in iter_chat_text_deltas(**stream_kw):
                 accumulated += delta
                 history_list[-1]["content"] = accumulated
                 yield _clone_message_history(history_list)
-            _persist_gradio_turn(session_id, history_list, accumulated)
+            _persist_answer_after_stream(session_id, request, accumulated)
         except (RuntimeError, ValueError) as exc:
             logger.warning("Gradio stream_chat failed: %s", exc)
             history_list[-1]["content"] = accumulated + (
@@ -235,8 +285,10 @@ def build_gradio_chat_blocks(
             )
             yield _clone_message_history(history_list)
 
-    def _clear_chat(session_id: Any) -> Tuple[List[Dict[str, Any]], str, Any]:
+    def _clear_chat(session_id: Any, request: gr.Request) -> Tuple[List[Dict[str, Any]], str, Any]:
         """Clear UI; truncate Redis message list for current session when enabled."""
+        sess = _starlette_session_from_gradio(request)
+        GradioSessionTurn.clear_active_turn_id(sess)
         sid = session_id
         client, rs = get_redis_for_gradio()
         if sid and client and rs is not None and rs.enabled:
@@ -274,13 +326,21 @@ def build_gradio_chat_blocks(
                 gr.HTML(header_md)
 
             session_state = gr.State(value=None)
-            chatbot = gr.Chatbot(
-                height=560,
-                label="对话",
-                type="messages",
-                layout="bubble",
-                scale=1,
-            )
+            # Gradio 4.x defaults to tuples ``[[user, bot], ...]``; we use ``{role, content}``
+            # rows everywhere. Gradio 6+ dropped ``type=`` (messages-only). Pass ``messages``
+            # only when the constructor still accepts it so ``<7`` and 6+ both work.
+            _chatbot_kw: Dict[str, Any] = {
+                "height": 560,
+                "label": "对话",
+                "layout": "bubble",
+                "scale": 1,
+            }
+            try:
+                if "type" in inspect.signature(gr.Chatbot.__init__).parameters:
+                    _chatbot_kw["type"] = "messages"
+            except (TypeError, ValueError) as exc:
+                logger.debug("Chatbot signature introspection skipped: %s", exc)
+            chatbot = gr.Chatbot(**_chatbot_kw)
             msg = gr.Textbox(
                 show_label=False,
                 lines=2,
@@ -295,19 +355,32 @@ def build_gradio_chat_blocks(
 
             submit_event = msg.submit(
                 _user_turn,
-                [msg, chatbot, session_state],
+                [msg, chatbot, session_state, gr.Request()],
                 [msg, chatbot, session_state],
                 queue=False,
             )
-            submit_event.then(_stream_assistant, [chatbot, session_state], [chatbot])
+            submit_event.then(
+                _stream_assistant,
+                [chatbot, session_state, gr.Request()],
+                [chatbot],
+            )
 
             submit_btn.click(
                 _user_turn,
-                [msg, chatbot, session_state],
+                [msg, chatbot, session_state, gr.Request()],
                 [msg, chatbot, session_state],
                 queue=False,
-            ).then(_stream_assistant, [chatbot, session_state], [chatbot])
+            ).then(
+                _stream_assistant,
+                [chatbot, session_state, gr.Request()],
+                [chatbot],
+            )
 
-            clear_btn.click(_clear_chat, session_state, [chatbot, msg, session_state], queue=False)
+            clear_btn.click(
+                _clear_chat,
+                [session_state, gr.Request()],
+                [chatbot, msg, session_state],
+                queue=False,
+            )
 
     return demo

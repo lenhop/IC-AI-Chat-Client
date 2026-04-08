@@ -44,6 +44,50 @@ class AppConfig:
     deepseek_llm_model: str
     deepseek_base_url: str
     deepseek_request_timeout: int
+    # Gradio: hide optional message types (query/answer always shown).
+    clarification_message_display_enable: bool = True
+    rewriting_message_display_enable: bool = True
+    classification_message_display_enable: bool = True
+    plan_message_display_enable: bool = True
+    reason_message_display_enable: bool = True
+    context_message_display_enable: bool = True
+    dispatcher_message_display_enable: bool = True
+    # UI / SSE: local process calls DeepSeek/Ollama; http = delegate to LLM microservice.
+    llm_transport: str = "local"
+    llm_service_url: str = ""
+    llm_service_timeout_seconds: int = 120
+    llm_service_api_key: str = ""
+
+
+@dataclass(frozen=True)
+class MessageDisplayOptions:
+    """Subset of AppConfig used when building Gradio history rows (avoids coupling to full config)."""
+
+    clarification_message_display_enable: bool
+    rewriting_message_display_enable: bool
+    classification_message_display_enable: bool
+    plan_message_display_enable: bool
+    reason_message_display_enable: bool
+    context_message_display_enable: bool
+    dispatcher_message_display_enable: bool
+
+    @classmethod
+    def from_app_config(cls, cfg: AppConfig) -> MessageDisplayOptions:
+        """Build options from a resolved ``AppConfig`` snapshot."""
+        return cls(
+            clarification_message_display_enable=cfg.clarification_message_display_enable,
+            rewriting_message_display_enable=cfg.rewriting_message_display_enable,
+            classification_message_display_enable=cfg.classification_message_display_enable,
+            plan_message_display_enable=cfg.plan_message_display_enable,
+            reason_message_display_enable=cfg.reason_message_display_enable,
+            context_message_display_enable=cfg.context_message_display_enable,
+            dispatcher_message_display_enable=cfg.dispatcher_message_display_enable,
+        )
+
+    @classmethod
+    def all_enabled(cls) -> MessageDisplayOptions:
+        """Default when no config is passed (e.g. tests): show every optional type."""
+        return cls(True, True, True, True, True, True, True)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -118,6 +162,9 @@ def get_config() -> AppConfig:
     if llm_backend not in {"deepseek", "ollama"}:
         llm_backend = "deepseek"
 
+    lt_raw = (os.getenv("LLM_TRANSPORT") or "local").strip().lower()
+    llm_transport = lt_raw if lt_raw in {"local", "http"} else "local"
+
     return AppConfig(
         user_id=(os.getenv("USER_ID") or "local-dev").strip(),
         session_id=(os.getenv("SESSION_ID") or "").strip(),
@@ -132,15 +179,34 @@ def get_config() -> AppConfig:
         deepseek_llm_model=(os.getenv("DEEPSEEK_LLM_MODEL") or "deepseek-chat").strip(),
         deepseek_base_url=(os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip().rstrip("/"),
         deepseek_request_timeout=_read_positive_int("DEEPSEEK_REQUEST_TIMEOUT", 600),
+        clarification_message_display_enable=_env_bool(
+            "CLARIFICATION_MESSAGE_DISPLAY_ENABLE", default=True
+        ),
+        rewriting_message_display_enable=_env_bool(
+            "REWRITING_MESSAGE_DISPLAY_ENABLE", default=True
+        ),
+        classification_message_display_enable=_env_bool(
+            "CLASSIFICATION_MESSAGE_DISPLAY_ENABLE", default=True
+        ),
+        plan_message_display_enable=_env_bool("PLAN_MESSAGE_DISPLAY_ENABLE", default=True),
+        reason_message_display_enable=_env_bool("REASON_MESSAGE_DISPLAY_ENABLE", default=True),
+        context_message_display_enable=_env_bool("CONTEXT_MESSAGE_DISPLAY_ENABLE", default=True),
+        dispatcher_message_display_enable=_env_bool(
+            "DISPATCHER_MESSAGE_DISPLAY_ENABLE", default=True
+        ),
+        llm_transport=llm_transport,
+        llm_service_url=(os.getenv("LLM_SERVICE_URL") or "").strip().rstrip("/"),
+        llm_service_timeout_seconds=_read_positive_int("LLM_SERVICE_TIMEOUT_SECONDS", 120),
+        llm_service_api_key=(os.getenv("LLM_SERVICE_API_KEY") or "").strip(),
     )
 
 
-def validate_standalone_env() -> None:
+def validate_llm_worker_env() -> None:
     """
-    Check required variables for LLM_BACKEND in os.environ (Standalone app only).
+    Validate env for the standalone LLM microservice (keys / Ollama only).
 
     Raises:
-        RuntimeError: If any required variable is missing or blank.
+        RuntimeError: When LLM_BACKEND credentials are missing or invalid.
     """
     backend = (os.getenv("LLM_BACKEND") or "deepseek").strip().lower()
     if backend not in {"deepseek", "ollama"}:
@@ -163,9 +229,45 @@ def validate_standalone_env() -> None:
 
     if missing:
         raise RuntimeError(
-            "Standalone .env is missing required variables for "
+            "LLM worker .env is missing required variables for "
             f"LLM_BACKEND={backend!r}: {', '.join(missing)}"
         )
+
+
+def validate_standalone_env() -> None:
+    """
+    Check required variables for standalone UI + optional HTTP LLM transport.
+
+    Raises:
+        RuntimeError: If any required variable is missing or blank.
+    """
+    transport_raw = (os.getenv("LLM_TRANSPORT") or "").strip()
+    if transport_raw and transport_raw.lower() not in {"local", "http"}:
+        raise RuntimeError(
+            "LLM_TRANSPORT must be local or http "
+            f"(got {transport_raw!r})"
+        )
+    transport = (transport_raw or "local").strip().lower()
+    if transport not in {"local", "http"}:
+        transport = "local"
+
+    if transport == "http":
+        if not (os.getenv("LLM_SERVICE_URL") or "").strip():
+            raise RuntimeError(
+                "LLM_TRANSPORT=http requires a non-empty LLM_SERVICE_URL."
+            )
+        timeout_missing: List[str] = []
+        _optional_positive_int("LLM_SERVICE_TIMEOUT_SECONDS", timeout_missing)
+        if timeout_missing:
+            raise RuntimeError(
+                "LLM_SERVICE_TIMEOUT_SECONDS must be a positive integer when set."
+            )
+        _validate_redis_env()
+        _validate_chat_mode_env()
+        _validate_gradio_ui_theme_env()
+        return
+
+    validate_llm_worker_env()
 
     _validate_redis_env()
     _validate_chat_mode_env()
@@ -225,15 +327,23 @@ def validate_app_config_for_ui(cfg: AppConfig) -> None:
     Raises:
         ValueError: On missing or inconsistent fields.
     """
-    backend = (cfg.llm_backend or "").strip().lower()
-    if backend not in {"deepseek", "ollama"}:
-        raise ValueError(f"AppConfig.llm_backend must be deepseek or ollama, got {cfg.llm_backend!r}")
-
     if cfg.memory_rounds < 0:
         raise ValueError("AppConfig: memory_rounds must be >= 0")
     cm = (cfg.chat_mode or "").strip().lower()
     if cm not in {"messages", "prompt_template"}:
         raise ValueError("AppConfig: chat_mode must be messages or prompt_template")
+
+    lt = (cfg.llm_transport or "local").strip().lower()
+    if lt == "http":
+        if not (cfg.llm_service_url or "").strip():
+            raise ValueError("AppConfig: llm_service_url is required when llm_transport is http")
+        if cfg.llm_service_timeout_seconds <= 0:
+            raise ValueError("AppConfig: llm_service_timeout_seconds must be positive")
+        return
+
+    backend = (cfg.llm_backend or "").strip().lower()
+    if backend not in {"deepseek", "ollama"}:
+        raise ValueError(f"AppConfig.llm_backend must be deepseek or ollama, got {cfg.llm_backend!r}")
 
     if backend == "deepseek":
         if not (cfg.deepseek_api_key or "").strip():

@@ -1,11 +1,10 @@
 """
 Session meta + typed message list in Redis (M3).
 
-New records: user_id, session_id, type, content, timestamp (ISO8601 UTC), optional turn_id.
-Legacy records: role, content, ts (unix) — normalized on read.
-
-Redis key helpers (``{prefix}session:{id}:…``) live in this module; naming aligns with
-tasks/project_goal.md §2.3.
+Each list element is JSON with required fields: ``user_id``, ``session_id``, ``type``,
+``content``, ``timestamp``, ``turn_id``. Legacy ``role``/``ts`` rows are **not** read
+(M3 v3.1 option B); upgrade Redis or clear old lists. Key helpers live here;
+naming aligns with tasks/project_goal.md §2.3.
 """
 
 from __future__ import annotations
@@ -19,7 +18,8 @@ from typing import Any, Dict, List, Optional
 
 import redis
 
-from app.config import RedisSettings
+from app.config import MessageDisplayOptions, RedisSettings
+from app.ui.message_model import GradioMessageFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def session_meta_key(prefix: str, session_id: str) -> str:
 
 
 def session_messages_key(prefix: str, session_id: str) -> str:
-    """List of JSON message objects (role, content, ts)."""
+    """List of JSON message objects (canonical typed schema)."""
     return f"{prefix}session:{session_id}:messages"
 
 
@@ -38,7 +38,8 @@ def session_events_key(prefix: str, session_id: str) -> str:
     """Placeholder list for M4 step events (optional touch on create)."""
     return f"{prefix}session:{session_id}:events"
 
-# Allowed message types for new writes; unknown types still accepted on read.
+
+# Advisory set for writers; unknown types are still accepted and stored.
 MEMORY_MESSAGE_TYPES = frozenset(
     {
         "query",
@@ -48,6 +49,8 @@ MEMORY_MESSAGE_TYPES = frozenset(
         "classification",
         "reason",
         "plan",
+        "context",
+        "dispatcher",
     }
 )
 
@@ -65,15 +68,36 @@ def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _iso_from_unix_ts(ts: Any) -> str:
-    """Convert legacy unix ``ts`` to ISO-like UTC string."""
-    try:
-        sec = int(ts)
-    except (TypeError, ValueError):
-        return ""
-    if sec <= 0:
-        return ""
-    return datetime.fromtimestamp(sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def _warn_if_unknown_message_type(message_type: str) -> None:
+    """Log when type is outside the advisory ``MEMORY_MESSAGE_TYPES`` set."""
+    if message_type not in MEMORY_MESSAGE_TYPES:
+        logger.warning(
+            "message type %r is not in MEMORY_MESSAGE_TYPES; storing anyway",
+            message_type,
+        )
+
+
+def _canonical_json_blob(
+    *,
+    user_id: str,
+    session_id: str,
+    turn_id: str,
+    timestamp: str,
+    message_type: str,
+    content: str,
+) -> str:
+    """Serialize one canonical message for Redis RPUSH."""
+    return json.dumps(
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "timestamp": timestamp,
+            "type": message_type,
+            "content": content,
+        },
+        ensure_ascii=False,
+    )
 
 
 def normalize_stored_message(
@@ -82,44 +106,47 @@ def normalize_stored_message(
     owner_user_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
-    Normalize one Redis JSON object to canonical typed shape.
+    Normalize one Redis JSON object to canonical typed shape (strict).
 
-    Legacy: ``role`` + ``content`` + ``ts`` -> ``query`` / ``answer``.
+    Requires non-empty ``type`` and ``timestamp``. Does not support legacy ``role``/``ts``.
 
     Args:
-        obj: Parsed JSON dict.
+        obj: Parsed JSON value (must be a dict).
         session_id: Session id for this list.
-        owner_user_id: Meta user_id for filling missing user_id.
+        owner_user_id: Meta user_id used when ``user_id`` is missing on the object.
 
     Returns:
-        Canonical dict or None if unusable.
+        Canonical dict or ``None`` if invalid or legacy-only payload.
+
+    Example:
+        >>> normalize_stored_message(
+        ...     {"type": "query", "content": "hi", "timestamp": "2020-01-01 00:00:00 UTC"},
+        ...     "sid",
+        ...     "u1",
+        ... )
+        {'user_id': 'u1', 'session_id': 'sid', 'type': 'query', 'content': 'hi', ...}
     """
     if not isinstance(obj, dict):
         return None
-    if (obj.get("type") or "").strip():
-        return {
-            "user_id": str(obj.get("user_id") or owner_user_id).strip(),
-            "session_id": str(obj.get("session_id") or session_id).strip(),
-            "type": str(obj.get("type") or "").strip(),
-            "content": str(obj.get("content") or ""),
-            "timestamp": str(obj.get("timestamp") or "").strip() or _iso_from_unix_ts(obj.get("ts")),
-            "turn_id": str(obj.get("turn_id") or "").strip(),
-        }
-    role = (obj.get("role") or "").strip()
-    content = str(obj.get("content") or "")
-    if role == "user":
-        mtype = "query"
-    elif role == "assistant":
-        mtype = "answer"
-    else:
+    mtype = str(obj.get("type") or "").strip()
+    if not mtype:
+        logger.debug("skip stored message without type (session_id=%s)", session_id)
+        return None
+    ts = str(obj.get("timestamp") or "").strip()
+    if not ts:
+        logger.warning(
+            "skip stored message missing timestamp (type=%r session_id=%s)",
+            mtype,
+            session_id,
+        )
         return None
     return {
-        "user_id": str(owner_user_id).strip(),
-        "session_id": str(session_id).strip(),
+        "user_id": str(obj.get("user_id") or owner_user_id).strip(),
+        "session_id": str(obj.get("session_id") or session_id).strip(),
         "type": mtype,
-        "content": content,
-        "timestamp": _iso_from_unix_ts(obj.get("ts")) or _iso_utc_now(),
-        "turn_id": "",
+        "content": str(obj.get("content") or ""),
+        "timestamp": ts,
+        "turn_id": str(obj.get("turn_id") or "").strip(),
     }
 
 
@@ -211,12 +238,32 @@ class SessionStore:
             raise
         self._touch_ttl(session_id)
 
+    def _rpush_canonical_blobs(
+        self,
+        session_id: str,
+        user_id: str,
+        blobs: List[str],
+    ) -> None:
+        """RPUSH one or more JSON strings, refresh meta ``last_active``, renew TTL."""
+        self._assert_session_user(session_id, user_id)
+        msg_k = session_messages_key(self._prefix, session_id)
+        meta_k = session_meta_key(self._prefix, session_id)
+        now_unix = int(time.time())
+        pipe = self._r.pipeline(transaction=True)
+        for blob in blobs:
+            pipe.rpush(msg_k, blob)
+        pipe.hset(meta_k, "last_active", str(now_unix))
+        pipe.execute()
+        self._touch_ttl(session_id)
+
     def append_turn(
         self,
         session_id: str,
         user_id: str,
         user_content: str,
         assistant_content: str,
+        *,
+        turn_id: Optional[str] = None,
     ) -> None:
         """
         Append one query + one answer with full typed schema; refresh meta last_active.
@@ -226,32 +273,75 @@ class SessionStore:
             user_id: Must match meta.
             user_content: Latest user turn text.
             assistant_content: Full assistant reply for this turn.
+            turn_id: When set, both messages share this id; otherwise a new UUID is used.
         """
-        self._assert_session_user(session_id, user_id)
         ts = _iso_utc_now()
-        turn_id = str(uuid.uuid4())
-        msg_k = session_messages_key(self._prefix, session_id)
-        meta_k = session_meta_key(self._prefix, session_id)
-        base = {
-            "user_id": user_id,
-            "session_id": session_id,
-            "timestamp": ts,
-            "turn_id": turn_id,
-        }
-        user_blob = json.dumps(
-            {**base, "type": "query", "content": user_content},
-            ensure_ascii=False,
+        tid_in = (turn_id or "").strip()
+        turn_uuid = tid_in if tid_in else str(uuid.uuid4())
+        blobs = [
+            _canonical_json_blob(
+                user_id=user_id,
+                session_id=session_id,
+                turn_id=turn_uuid,
+                timestamp=ts,
+                message_type="query",
+                content=user_content,
+            ),
+            _canonical_json_blob(
+                user_id=user_id,
+                session_id=session_id,
+                turn_id=turn_uuid,
+                timestamp=ts,
+                message_type="answer",
+                content=assistant_content,
+            ),
+        ]
+        self._rpush_canonical_blobs(session_id, user_id, blobs)
+
+    def append_memory_message(
+        self,
+        session_id: str,
+        user_id: str,
+        *,
+        message_type: str,
+        content: str,
+        turn_id: str = "",
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """
+        Append a single canonical message (any ``type``).
+
+        Args:
+            session_id: Target session.
+            user_id: Must match meta.
+            message_type: Stored ``type`` field (non-empty).
+            content: Message body.
+            turn_id: Optional shared turn UUID; empty string if none.
+            timestamp: ISO UTC string; defaults to now when missing or blank.
+
+        Raises:
+            ValueError: If ``message_type`` is blank.
+            SessionNotFoundError: Missing session meta.
+            SessionAccessDeniedError: user_id mismatch.
+
+        Example:
+            >>> store.append_memory_message(sid, "u1", message_type="plan", content="step a")
+        """
+        mt = (message_type or "").strip()
+        if not mt:
+            raise ValueError("message_type must be non-empty")
+        _warn_if_unknown_message_type(mt)
+        ts = (timestamp or "").strip() or _iso_utc_now()
+        tid = (turn_id or "").strip()
+        blob = _canonical_json_blob(
+            user_id=user_id,
+            session_id=session_id,
+            turn_id=tid,
+            timestamp=ts,
+            message_type=mt,
+            content=content,
         )
-        asst_blob = json.dumps(
-            {**base, "type": "answer", "content": assistant_content},
-            ensure_ascii=False,
-        )
-        now_unix = int(time.time())
-        pipe = self._r.pipeline(transaction=True)
-        pipe.rpush(msg_k, user_blob, asst_blob)
-        pipe.hset(meta_k, "last_active", str(now_unix))
-        pipe.execute()
-        self._touch_ttl(session_id)
+        self._rpush_canonical_blobs(session_id, user_id, [blob])
 
     def _assert_session_user(self, session_id: str, user_id: str) -> None:
         meta_k = session_meta_key(self._prefix, session_id)
@@ -274,53 +364,59 @@ class SessionStore:
 
 def messages_for_openai_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
-    Map normalized or legacy-shaped records to OpenAI-style role/content.
+    Map normalized records to OpenAI-style role/content (only query/answer).
 
     Args:
-        messages: Normalized dicts (preferred) or legacy role-based.
+        messages: Canonical dicts from ``get_messages``.
 
     Returns:
-        OpenAI-style message dicts (skips empty content).
+        OpenAI-style message dicts (skips empty content and non query/answer types).
+
+    Example:
+        >>> messages_for_openai_payload([{"type": "query", "content": "hi"}])
+        [{'role': 'user', 'content': 'hi'}]
     """
     out: List[Dict[str, str]] = []
     for m in messages:
         mtype = (m.get("type") or "").strip()
         content = (m.get("content") or "").strip()
-        if mtype == "query":
-            role = "user"
-        elif mtype == "answer":
-            role = "assistant"
-        else:
-            role = str(m.get("role") or "")
-        if not content or role not in ("system", "user", "assistant"):
+        if not content:
             continue
-        out.append({"role": role, "content": content})
+        if mtype == "query":
+            out.append({"role": "user", "content": content})
+        elif mtype == "answer":
+            out.append({"role": "assistant", "content": content})
     return out
 
 
-def gradio_history_from_stored(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def gradio_history_from_stored(
+    messages: List[Dict[str, Any]],
+    display: Optional[MessageDisplayOptions] = None,
+) -> List[Dict[str, Any]]:
     """
     Build Gradio Chatbot(type='messages') rows from normalized stored dicts.
 
-    query/answer map to user/assistant; other types become assistant lines with type tag.
-
     Args:
         messages: Normalized dicts from ``get_messages``.
+        display: Optional toggles for non-query/answer types; default shows all.
 
     Returns:
-        List of {role, content} for Gradio.
+        List of ``{role, content}`` for Gradio.
+
+    Example:
+        >>> gradio_history_from_stored(
+        ...     [{"type": "query", "content": "x", "timestamp": "t", ...}],
+        ...     MessageDisplayOptions.all_enabled(),
+        ... )
+        [{'role': 'user', 'content': 'x'}]
     """
+    opt = display if display is not None else MessageDisplayOptions.all_enabled()
     rows: List[Dict[str, Any]] = []
     for m in messages:
         mtype = (m.get("type") or "").strip()
-        content = str(m.get("content") or "")
-        if mtype == "query":
-            rows.append({"role": "user", "content": content})
-        elif mtype == "answer":
-            rows.append({"role": "assistant", "content": content})
-        elif mtype not in ("query", "answer") and mtype:
-            label = f"[{mtype}] {content}".strip()
-            rows.append({"role": "assistant", "content": label})
-        elif (m.get("role") or "") in ("system", "user", "assistant"):
-            rows.append({"role": str(m.get("role")), "content": content})
+        if not GradioMessageFormatter.should_display_type(mtype, opt):
+            continue
+        row = GradioMessageFormatter.to_chat_row(m)
+        if row is not None:
+            rows.append(row)
     return rows

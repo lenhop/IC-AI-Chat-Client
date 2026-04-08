@@ -12,6 +12,17 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
+
+def _all_messages_have_nonempty_turn_id(messages: List[Dict[str, Any]]) -> bool:
+    """True when every message carries a non-blank ``turn_id`` (M3 v3.2 grouping)."""
+    if not messages:
+        return False
+    for m in messages:
+        tid = str(m.get("turn_id") or "").strip()
+        if not tid:
+            return False
+    return True
+
 CHAT_PROMPT_FILENAME = "chat_prompt.md"
 
 
@@ -44,7 +55,11 @@ def load_chat_prompt_template() -> str:
 
 def split_messages_into_rounds(messages: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """
-    Split normalized messages into rounds: each new ``type=query`` starts a round.
+    Split normalized messages into conversation rounds.
+
+    When every row has a non-empty ``turn_id``, group consecutive rows that share
+    the same ``turn_id`` (multi-query clarifications stay one round). Otherwise
+    fall back to legacy behavior: each new ``type=query`` starts a round.
 
     Args:
         messages: Normalized records (ordered).
@@ -54,17 +69,31 @@ def split_messages_into_rounds(messages: List[Dict[str, Any]]) -> List[List[Dict
     """
     if not messages:
         return []
-    rounds: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
+    if _all_messages_have_nonempty_turn_id(messages):
+        rounds: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = [messages[0]]
+        cur_tid = str(messages[0].get("turn_id") or "").strip()
+        for m in messages[1:]:
+            tid = str(m.get("turn_id") or "").strip()
+            if tid == cur_tid:
+                current.append(m)
+            else:
+                rounds.append(current)
+                current = [m]
+                cur_tid = tid
+        rounds.append(current)
+        return rounds
+    rounds_q: List[List[Dict[str, Any]]] = []
+    current_q: List[Dict[str, Any]] = []
     for m in messages:
         mtype = (m.get("type") or "").strip()
-        if mtype == "query" and current:
-            rounds.append(current)
-            current = []
-        current.append(m)
-    if current:
-        rounds.append(current)
-    return rounds
+        if mtype == "query" and current_q:
+            rounds_q.append(current_q)
+            current_q = []
+        current_q.append(m)
+    if current_q:
+        rounds_q.append(current_q)
+    return rounds_q
 
 
 def _round_is_complete_for_prompt(round_msgs: List[Dict[str, Any]]) -> bool:

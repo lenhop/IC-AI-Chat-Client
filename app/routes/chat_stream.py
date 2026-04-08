@@ -3,7 +3,7 @@ SSE streaming endpoint for chat messages.
 
 Key points:
 1) Validate request body via Pydantic models.
-2) Delegate backend selection and execution to call_llm wrapper.
+2) Delegate streaming to ``llm_transport.iter_chat_text_deltas`` (local or HTTP worker).
 3) Stream JSON frames with SSE format for frontend incremental rendering.
 4) M3: optional session_id persists the completed user/assistant turn to Redis (best-effort).
 5) CHAT_MODE=prompt_template + Redis: single user message from chat_prompt.md + history.
@@ -25,7 +25,7 @@ from app.memory.session_store import (
     SessionNotFoundError,
     SessionStore,
 )
-from app.services.call_llm import stream_chat
+from app.services.llm_transport import iter_chat_text_deltas
 from app.services.prompt_render import (
     format_messages_markdown_for_prompt,
     render_chat_prompt,
@@ -162,8 +162,8 @@ async def chat_stream(payload: ChatStreamRequest, request: Request) -> Streaming
     def event_generator() -> Generator[str, None, None]:
         assistant_text = ""
         try:
-            for delta in stream_chat(
-                messages=stream_messages,
+            for delta in iter_chat_text_deltas(
+                stream_messages,
                 backend=payload.backend,
                 model_override=payload.model,
             ):

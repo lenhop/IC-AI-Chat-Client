@@ -1,3 +1,11 @@
 [submodule "external/IC-RAG-Agent"]
 	path = external/IC-RAG-Agent
 	url = git@github.com:lenhop/IC-RAG-Agent.git
+
+[submodule "external/IC-Agent-Skill"]
+	path = external/IC-Agent-Skill
+	url = git@github.com:lenhop/IC-Agent-Skill.git
+
+[submodule "external/IC-Self-Study"]
+	path = external/IC-Self-Study
+	url = git@github.com:lenhop/IC-Self-Study.git

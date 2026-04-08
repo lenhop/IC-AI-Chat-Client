@@ -10,6 +10,7 @@ Run from repo root (loads ``PROJECT_ROOT/.env``):
 
     python -m app.memory.redis_manage_ops --session-id <uuid> -n 10
     python -m app.memory.redis_manage_ops --user-id local-dev -n 5 --type query
+    python app/memory/redis_manage_ops.py --user-id local-dev -n 5
     python -m app.memory.redis_manage_ops --session-id <uuid> --clear
     python -m app.memory.redis_manage_ops --session-id <uuid> --clear -n 3 --type answer
 """
@@ -25,6 +26,11 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import redis
 from dotenv import load_dotenv
+
+# Direct file execution puts ``app/memory`` on ``sys.path``; ``app`` package lives at repo root.
+if __package__ is None:
+    _REPO_ROOT = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from app.config import get_redis_settings
 from app.memory.session_store import (
@@ -134,62 +140,106 @@ def assert_session_owner(client: redis.Redis, prefix: str, session_id: str, user
     return owner
 
 
-def load_raw_and_normalized(
+def load_session_messages(
     client: redis.Redis,
     prefix: str,
     session_id: str,
     owner_user_id: str,
-) -> Tuple[List[str], List[Dict[str, Any]]]:
+) -> Tuple[List[str], List[Optional[Dict[str, Any]]], List[Optional[Dict[str, Any]]]]:
     """
-    Read messages list as raw JSON strings plus normalized dicts (same order).
-
-    Args:
-        client: Redis client.
-        prefix: Key prefix.
-        session_id: Session id.
-        owner_user_id: Meta owner (for normalization of legacy rows).
+    Read ``:messages`` list: raw Redis strings, full parsed objects, and normalized rows.
 
     Returns:
-        (raw_strings, normalized_dicts) aligned by index where parse succeeded;
-        failed JSON rows are dropped from both in sync — actually we keep raw
-        for rewrite; simpler: parallel lists only for successfully parsed.
-
-    For rewrite we need full raw list with indices. Return:
-        list of tuples (index, raw, optional_norm)
+        (raw_list, full_list, norm_list) same length. ``full_list[i]`` is a shallow copy
+        of the Redis JSON object when it is a dict (all keys preserved for listing).
+        ``norm_list[i]`` is :func:`normalize_stored_message` or ``None`` (used by
+        ``--clear`` to decide removable rows, unchanged from prior behavior).
     """
     msg_k = session_messages_key(prefix, session_id)
     raw_list = client.lrange(msg_k, 0, -1)
-    norms: List[Optional[Dict[str, Any]]] = []
+    full_list: List[Optional[Dict[str, Any]]] = []
+    norm_list: List[Optional[Dict[str, Any]]] = []
     for raw in raw_list:
         try:
             obj = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            norms.append(None)
+            full_list.append(None)
+            norm_list.append(None)
             continue
-        norms.append(normalize_stored_message(obj, session_id, owner_user_id))
-    return raw_list, norms
+        if isinstance(obj, dict):
+            snapshot = dict(obj)
+            full_list.append(snapshot)
+            norm_list.append(normalize_stored_message(snapshot, session_id, owner_user_id))
+        else:
+            full_list.append(None)
+            norm_list.append(None)
+    return raw_list, full_list, norm_list
 
 
-def filter_tail_messages(
-    normalized: List[Optional[Dict[str, Any]]],
+def _enrich_message_dict(
+    message: Dict[str, Any],
+    session_id: str,
+    owner_user_id: str,
+) -> Dict[str, Any]:
+    """
+    Copy message and ensure ``user_id`` / ``session_id`` are visible when Redis omitted them.
+
+    Does not remove or rename keys from Redis.
+    """
+    out = dict(message)
+    uid = str(out.get("user_id") or "").strip()
+    if not uid:
+        out["user_id"] = owner_user_id
+    sid = str(out.get("session_id") or "").strip()
+    if not sid:
+        out["session_id"] = session_id
+    return out
+
+
+def build_display_rows_for_session(
+    raw_list: List[str],
+    full_list: List[Optional[Dict[str, Any]]],
+    session_id: str,
+    owner_user_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    One display dict per Redis list index: full message fields or a decode-error wrapper.
+    """
+    rows: List[Dict[str, Any]] = []
+    for raw, full in zip(raw_list, full_list):
+        if isinstance(full, dict):
+            rows.append(_enrich_message_dict(full, session_id, owner_user_id))
+        else:
+            rows.append(
+                {
+                    "user_id": owner_user_id,
+                    "session_id": session_id,
+                    "_redis_decode_error": True,
+                    "raw": raw,
+                }
+            )
+    return rows
+
+
+def filter_tail_display_rows(
+    rows: List[Dict[str, Any]],
     *,
     message_type: Optional[str],
     count: int,
 ) -> List[Dict[str, Any]]:
     """
-    From chronological list, keep entries that match ``message_type`` (if set),
-    then take the last ``count`` non-None normalized dicts.
-
-    If ``message_type`` is None, use all non-None entries, last ``count``.
+    Chronological ``rows``: optional ``--type`` filter, then last ``count`` rows
+    (``count <= 0`` means no limit).
     """
     typed = message_type.strip().lower() if message_type else None
     candidates: List[Dict[str, Any]] = []
-    for n in normalized:
-        if n is None:
-            continue
-        if typed and (n.get("type") or "").strip().lower() != typed:
-            continue
-        candidates.append(n)
+    for r in rows:
+        if typed:
+            if r.get("_redis_decode_error"):
+                continue
+            if (r.get("type") or "").strip().lower() != typed:
+                continue
+        candidates.append(r)
     if count <= 0:
         return candidates
     return candidates[-count:]
@@ -206,23 +256,22 @@ def merge_recent_across_sessions(
 ) -> List[Dict[str, Any]]:
     """
     Merge messages from multiple sessions, sort by ``timestamp`` descending,
-    apply optional type filter, return up to ``count`` items.
+    apply optional type filter, return up to ``count`` items (full Redis fields each).
     """
+    typed = message_type.strip().lower() if message_type else None
     merged: List[Dict[str, Any]] = []
     for sid in session_ids:
         try:
-            _, norms = load_raw_and_normalized(client, prefix, sid, owner_user_id)
+            _, full_list, _ = load_session_messages(client, prefix, sid, owner_user_id)
         except redis.RedisError as exc:
             logger.warning("skip session %s: %s", sid, exc)
             continue
-        for n in norms:
-            if n is None:
+        for full in full_list:
+            if not isinstance(full, dict):
                 continue
-            if message_type and (n.get("type") or "").strip().lower() != message_type.strip().lower():
+            if typed and (full.get("type") or "").strip().lower() != typed:
                 continue
-            row = dict(n)
-            row["_session_id"] = sid
-            merged.append(row)
+            merged.append(_enrich_message_dict(dict(full), sid, owner_user_id))
     merged.sort(key=lambda x: (x.get("timestamp") or ""), reverse=True)
     if count <= 0:
         return merged
@@ -250,7 +299,9 @@ def clear_messages_list(
     """
     assert_session_owner(client, prefix, session_id, owner_user_id)
     msg_k = session_messages_key(prefix, session_id)
-    raw_list, norms = load_raw_and_normalized(client, prefix, session_id, owner_user_id)
+    raw_list, _full_list, norms = load_session_messages(
+        client, prefix, session_id, owner_user_id
+    )
 
     if remove_last_n_matching is None:
         deleted = len(raw_list)
@@ -320,15 +371,16 @@ def clear_all_sessions_for_user(
 
 
 def _print_messages(rows: List[Dict[str, Any]]) -> None:
+    """Print each message as JSON with all keys (stable order), no field dropping."""
     for i, row in enumerate(rows, start=1):
-        m = dict(row)
-        sid = m.pop("_session_id", None)
-        extra = f" session_id={sid}" if sid else ""
-        print(
-            f"{i}.{extra}\n"
-            f"   type={m.get('type')!r} ts={m.get('timestamp')!r}\n"
-            f"   content={m.get('content')!r}\n"
-        )
+        try:
+            blob = json.dumps(row, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+        except (TypeError, ValueError) as exc:
+            logger.warning("json encode row %s: %s", i, exc)
+            blob = repr(row)
+        print(f"{i}.")
+        print(blob)
+        print()
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -358,7 +410,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--type",
         dest="message_type",
         default=None,
-        help="Filter by message type (e.g. query, answer).",
+        help="Filter by message type: query, answer, clarification, rewriting, "
+        "classification, reason, plan, context, dispatcher.",
     )
     p.add_argument(
         "--clear",
@@ -416,9 +469,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.session_id:
             sid = args.session_id.strip()
             owner = assert_session_owner(client, prefix, sid, effective_user)
-            _, norms = load_raw_and_normalized(client, prefix, sid, owner)
-            rows = filter_tail_messages(norms, message_type=args.message_type, count=count)
-            _print_messages([dict(m) for m in rows])
+            raw_list, full_list, _norms = load_session_messages(
+                client, prefix, sid, owner
+            )
+            all_rows = build_display_rows_for_session(raw_list, full_list, sid, owner)
+            rows = filter_tail_display_rows(
+                all_rows, message_type=args.message_type, count=count
+            )
+            _print_messages(rows)
         else:
             sids = find_session_ids_for_user(client, prefix, effective_user)
             if not sids:

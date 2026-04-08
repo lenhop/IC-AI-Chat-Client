@@ -218,3 +218,4 @@ libs/ai-toolkit/
 # Task management folder
 data/
 tasks/
+external/

@@ -1,16 +1,14 @@
 # IC-AI-Chat-Client
 
-基于 **FastAPI** 的聊天演示应用：**Gradio** 为主聊天界面（多主题），**Jinja2** 为可选旧版页面。后端统一走 **DeepSeek（OpenAI 兼容 API）** 或 **Ollama**，支持流式多轮对话。
+基于 **FastAPI** 的聊天演示应用：**Gradio** 为主聊天界面（多主题）。后端统一走 **DeepSeek（OpenAI 兼容 API）** 或 **Ollama**，支持流式多轮对话。
 
 | 能力 | 说明 |
 |------|------|
 | **一体运行** | 同一进程：`Uvicorn` + Gradio + LLM 封装，浏览器即用。 |
 | **Python 集成** | `app.integrations`（`RuntimeConfig`、`stream_chat`、`stream_chat_chunks`、`list_chat_model_names`、`complete_chat`）；或 `app.ui.gradio_chat.build_gradio_chat_blocks` 挂载同款 UI。 |
-| **不推荐** | 把 `POST /api/chat/stream` 当作对外公共 API（仅供内置页 / 调试）。 |
+| **不推荐** | 把 `POST /api/chat/stream` 当作对外稳定公共 API。 |
 
-**文档与计划**：`tasks/project_goal.md`（总目标与里程碑）· `tasks/m1_plan.md` · `tasks/m1_plan_v2.md` · `tasks/m1_plan_v3.md` · **`tasks/m2_plan.md`（M2：chunk 抽象、模型列表、无 Redis）** · **`tasks/m3_plan.md`（M3：Redis 会话与刷新恢复）**。
-
-**里程碑（摘要）**：M1 已交付 **FastAPI + Gradio/Jinja + DeepSeek/Ollama**；M2 为 **`ChatStreamChunk` / `stream_chat_chunks`**、**`list_chat_model_names`**（Ollama 拉 tags，DeepSeek 返回当前配置模型）及生产说明；**M3** 为 **可选 Redis 会话**（`REDIS_ENABLED`、键前缀与 TTL、内置会话 API、Gradio 签名 Cookie + `/legacy` sessionStorage）；**M4** Route/Dispatcher 时间线（见 `project_goal.md` §4）。
+设计与键空间等说明见 [`tasks/`](tasks/)（如 `project_goal.md`）。
 
 ---
 
@@ -29,7 +27,7 @@ Conda 示例：
 /opt/miniconda3/bin/python -m pip install -r requirements.txt
 ```
 
-主要依赖：`fastapi`、`uvicorn`、`gradio`、`jinja2`、`python-dotenv`、`httpx`、`openai`、`redis`（M3 会话）；测试使用 `fakeredis`。Pydantic v2 随 FastAPI 安装。
+主要依赖：`fastapi`、`uvicorn`、`gradio`、`jinja2`、`python-dotenv`、`httpx`、`openai`、`redis`；测试使用 `fakeredis`。Pydantic v2 随 FastAPI 安装。
 
 ---
 
@@ -51,7 +49,26 @@ cp .env.example .env
 
 其它常用项：`DEEPSEEK_LLM_MODEL`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_REQUEST_TIMEOUT`、`OLLAMA_REQUEST_TIMEOUT`、`USER_ID`、`SESSION_ID` 等，见 `.env.example`。
 
-### 2.2 Gradio 界面主题
+### 2.2 双进程 LLM（可选，`LLM_TRANSPORT`）
+
+| 变量 | 说明 |
+|------|------|
+| `LLM_TRANSPORT` | `local`（默认）：本进程直连 DeepSeek/Ollama。`http`：Gradio 与内置 SSE 仅通过 HTTP 调用独立 LLM 微服务（密钥放在微服务侧 `.env`）。 |
+| `LLM_SERVICE_URL` | `LLM_TRANSPORT=http` 时**必填**：微服务根 URL，无尾斜杠（如 `http://127.0.0.1:8001`）。 |
+| `LLM_SERVICE_TIMEOUT_SECONDS` | 流式读取超时（秒），默认 `120`。 |
+| `LLM_SERVICE_API_KEY` | 可选；若设置，UI 进程请求微服务时带 `Authorization: Bearer …`。 |
+
+**微服务进程**（仅加载 LLM 相关环境变量，不连 Redis）：
+
+```bash
+python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
+```
+
+**UI 进程**（`app.main`）：`.env` 中设 `LLM_TRANSPORT=http` 与 `LLM_SERVICE_URL`；启动校验走 `validate_standalone_env` 的 HTTP 分支（不要求本机配置 `DEEPSEEK_API_KEY` / Ollama 变量）。微服务进程仍需通过 `validate_llm_worker_env`（与原先 `LLM_BACKEND` 规则一致）。
+
+流式冒烟（需微服务已启动）：`python scripts/smoke_llm_http_stream.py --url http://127.0.0.1:8001`
+
+### 2.3 Gradio 界面主题
 
 | 变量 | 说明 |
 |------|------|
@@ -61,41 +78,32 @@ cp .env.example .env
 
 代码中可用 `build_gradio_chat_blocks(theme="warm")` **覆盖**环境变量。
 
-### 2.3 服务监听
+### 2.4 服务监听
 
 `UVICORN_HOST`、`UVICORN_PORT` 由 `scripts/run.py` 读取；直接用 `uvicorn` 命令时也可在命令行指定 `--host` / `--port`。
 
-### 2.4 Redis 与会话（M3，可选）
+### 2.5 Redis 与会话
 
-`REDIS_ENABLED=false`（默认）时**不连接 Redis**，行为与 M2 一致；不注册 `POST /api/sessions` 等会话路由。
+- **默认**：`REDIS_ENABLED=false`。不连 Redis，不注册 `POST /api/sessions` 等会话路由。
+- **开启 Redis**：`REDIS_ENABLED=true` 且配置可用 `REDIS_URL`。启动时会 `ping`；失败则进程直接报错退出。
+- **键前缀**：`REDIS_KEY_PREFIX`（默认 `icai:`），会话键形如 `{prefix}session:{uuid}:meta` / `:messages`（细节见 `project_goal.md` §2.3）。
+- **TTL**：`REDIS_SESSION_TTL_SECONDS`（默认 30 天）；有写入时会续期。
+- **记忆窗口**：`MEMORY_ROUNDS`（默认 `3`）。一轮在 Redis 里通常对应同一 `turn_id` 下的一组消息（可含多条 `query` 澄清）；无 `turn_id` 的旧数据仍按「新 `query` 起一轮」切分。`0` 表示不按轮截断、展示全部已存消息。
+- **对话模式**：`CHAT_MODE=messages`（默认），多轮 `messages` 调 LLM。`prompt_template` 需 `REDIS_ENABLED=true`，模板见 [`chat_prompt.md`](app/services/chat_prompt.md)（`{historical_message}`、`{current_query}`）。
+- **Gradio + Redis**：需在 `.env` 配置足够随机的 **`SECRET_KEY`**（签名 Cookie，刷新后恢复 `icai_gradio_session_id`）。
+- **单条消息 JSON**（`messages` 列表里每项）必填：`user_id`、`session_id`、`type`、`content`、`timestamp`、`turn_id`。常见 `type`：`query`、`answer`、`clarification`、`rewriting`、`classification`、`reason`、`plan`、`context`、`dispatcher`。
+- **旧数据**：不支持仅 `role`/`ts` 的旧行。库里有遗留数据时，请先清空对应 key 或离线迁移再升级。
+- **可选类型是否在气泡里显示**：7 个 `*_MESSAGE_DISPLAY_ENABLE`（见 `.env.example`）。`query`/`answer` 始终显示。开关只影响 Gradio；`prompt_template` 拼进模型的历史仍含全部类型。
+- **会话 API**（内置调试用）：`POST /api/sessions` 创建；`GET /api/sessions/{session_id}/messages` 拉取；`POST /api/sessions/{session_id}/messages` 按条追加（Body：`type`、`content`、`turn_id`，与 `USER_ID` 校验）。越权 403，无会话 404。
+- **写回（Gradio + Redis）**：用户发送即写入 `query`（Starlette 会话中保留活跃 `turn_id`）；流式**成功**后写入 `answer` 并清除该 `turn_id`；**失败**不写 `answer`。Legacy 页面 `POST /api/chat/stream` 仍在整轮成功后 `append_turn`（无浏览器 `turn_id` 状态）。
+- **`app.integrations`**：始终多轮 `stream_chat(messages=...)`，不受 `prompt_template` 影响。
+- **安全**：`session_id` 可能泄露；当前只比对 meta 与 `.env` 的 `USER_ID`。公网勿把 `USER_ID` 当多租户边界（见 `project_goal.md` §2.4、§5）。
 
-| 变量 | 说明 |
-|------|------|
-| `REDIS_ENABLED` | `true` / `false`（或 `1` / `yes` / `on`）；为 `true` 时必须配置可用 `REDIS_URL`。 |
-| `REDIS_URL` | 例如 `redis://127.0.0.1:6379/0`。 |
-| `REDIS_KEY_PREFIX` | 默认 `icai:`；键形如 `{prefix}session:{uuid}:meta` / `:messages`（见 `project_goal.md` §2.3）。 |
-| `REDIS_SESSION_TTL_SECONDS` | 默认 `2592000`（30 天）；每次写入会对待命中的 key 续期。 |
-| `MEMORY_ROUNDS` | 默认 `3`；Gradio 首屏只展示最近 N **轮**（一轮 = `query` + `answer`）；`0` = 展示全部已存消息。 |
-| `CHAT_MODE` | `messages`（默认）：与 M2 相同，多轮 `messages` 调 LLM。`prompt_template`：**必须** `REDIS_ENABLED=true`，使用 [`app/services/chat_prompt.md`](app/services/chat_prompt.md) 中的 `{historical_message}` 与 `{current_query}` 拼成**单条 user** 再流式调用 LLM（内置 Gradio / `/legacy` SSE）。 |
-
-启用 Redis 后，进程启动时会对 Redis **ping**；**连不上则抛出 `RuntimeError` 且进程不进入可服务状态**。Gradio 路径依赖 **`SECRET_KEY`**（与 Starlette `SessionMiddleware` 签名 Cookie，用于同一浏览器内刷新后恢复 `session_id`）；请与 `.env.example` 一样设为足够随机的值。
-
-**本地起 Redis 示例**：
+本地 Redis 示例：
 
 ```bash
 docker run -d --name icai-redis -p 6379:6379 redis:7-alpine
 ```
-
-**内置会话 API**（仅供内置 UI / 调试，非对外稳定契约）：
-
-- `POST /api/sessions`：创建会话，返回 `session_id`（归属当前 `.env` 的 `USER_ID`）。
-- `GET /api/sessions/{session_id}/messages`：拉取已存消息（`user_id` 与 meta 不一致时 **403**，无此会话时 **404**）。
-
-**刷新恢复**：`/legacy` 使用 **sessionStorage**（`icai_legacy_session_id`）；`/gradio` 使用 **签名会话 Cookie** 中的 `icai_gradio_session_id`。流式结束后服务端将本轮 **user + assistant** 全文写入 Redis（失败仅打日志，不阻断 SSE）。每条落库记录含 **`user_id`、`session_id`、`type`**（如 `query` / `answer`，可扩展 `plan` 等）、**`content`、`timestamp`（UTC 字符串）**；旧版仅 `role`+`ts` 的数据在读时自动归一化。
-
-**`app.integrations`**：仍走多轮 `stream_chat(messages=...)`，不受 `CHAT_MODE=prompt_template` 影响。
-
-**安全提示**：`session_id` 可被猜测或泄露；M3 仅校验 meta 中的 `user_id` 与当前配置的 `USER_ID` 是否一致。**不能**将 `.env` 中的 `USER_ID` 当作公网多租户身份边界；生产应把真实身份放在网关 / OIDC，并自行加强会话绑定（见 `project_goal.md` §2.4、§5）。
 
 ---
 
@@ -114,24 +122,27 @@ docker run -d --name icai-redis -p 6379:6379 redis:7-alpine
 
 **前提**：在仓库根目录（或 `PYTHONPATH` 含该根目录）执行，且根目录已有合法 `.env`。
 
-```bash
-python scripts/run.py
-```
-
-或：
+启动或重启服务：
 
 ```bash
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+**打开聊天界面**
+
+- 默认监听：`UVICORN_HOST` / `UVICORN_PORT`（常见为 `0.0.0.0:8000`，以 `.env` 为准）。
+- 浏览器访问：**根路径**或 **`/gradio`** 均可进入主聊天（根路径会 **302** 到 Gradio）。
+  - 本机：`http://127.0.0.1:8000/` 或 `http://127.0.0.1:8000/gradio`
+  - 局域网其它设备：`http://<服务器IP>:8000/gradio`（需 `UVICORN_HOST=0.0.0.0` 且防火墙放行端口）
+
 | 地址 | 说明 |
 |------|------|
 | `/` | **302** 重定向到 Gradio。 |
-| `/gradio` | **主聊天界面**（`Chatbot` 为 `type="messages"` 气泡布局）。 |
-| `/legacy` | Jinja2 + 静态资源的旧版页（`POST /api/chat/stream`）。 |
+| `/gradio` | **主聊天界面**（气泡布局）。 |
 | `/docs` | FastAPI OpenAPI（若未关闭）。 |
+| `/legacy` | 旧版 Jinja + 前端 SSE 聊天页（仍使用 `POST /api/chat/stream`）。 |
 
-`REDIS_ENABLED=true` 时，OpenAPI 中还可看到 **`POST /api/sessions`**、**`GET /api/sessions/{session_id}/messages`**（与内置页配合使用）。
+`REDIS_ENABLED=true` 时，OpenAPI 中还可看到 **`POST /api/sessions`**、**`GET/POST /api/sessions/{session_id}/messages`**（与内置页 / 调试配合使用）。验证 Gradio 气泡交互不建议手写 curl；需要时可使用 **`gradio_client`** 或 Playwright 等做 UI 层冒烟。
 
 ### 场景示例
 
@@ -259,7 +270,8 @@ if __name__ == "__main__":
 | 现象 | 处理 |
 |------|------|
 | 缺少 `.env` | 从 `.env.example` 复制到仓库根目录。 |
-| `Standalone .env is missing required variables` | 按 `LLM_BACKEND` 补全 §2.1 表内变量。 |
+| `Standalone .env is missing required variables` | 按 `LLM_BACKEND` 补全 §2.1 表内变量（`LLM_TRANSPORT=http` 时见 §2.2，不要求本机 LLM 密钥）。 |
+| `LLM_TRANSPORT=http requires …` | 设置 `LLM_SERVICE_URL`；并先启动 `app.llm_service.main:app`。 |
 | `GRADIO_UI_THEME` 报错 | 仅允许 `business`、`warm`、`minimal`（大小写不敏感）。 |
 | `REDIS_ENABLED is true but REDIS_URL is missing` | 开启 Redis 时必须填写 `REDIS_URL`。 |
 | 启动报 Redis / Connection refused | 确认 Redis 已启动且 `REDIS_URL` 可达。 |
@@ -279,7 +291,7 @@ if __name__ == "__main__":
   ```
   开发阶段仍推荐 `uvicorn app.main:app --reload`。Worker 数与超时需按 LLM 流式耗时调整。
 - **健康检查**：可对外暴露 FastAPI 自带 `GET /docs` 或自建 `/health`（按需添加路由）。
-- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（M2 chunk / 模型列表；M3 `test_session_store` 使用 fakeredis）。
+- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（含 `test_llm_transport`、`test_turn_lifecycle`、`test_sessions_api`、`test_session_store` 等；fakeredis，无 live LLM）。
 
 ---
 
@@ -292,20 +304,27 @@ app/
   deps.py              # require_session_store（M3）
   integrations.py      # 对外 LLM 稳定导出
   runtime_config.py    # RuntimeConfig（库集成）
-  memory/                # M3：keys、redis_pool、session_store、runtime（Gradio 绑定）
+  memory/                # redis_pool、session_store、redis_runtime（Gradio 绑定 Redis）
+  llm_service/
+    main.py              # 可选第二进程：POST /v1/chat/stream（SSE）
   ui/
     gradio_chat.py       # build_gradio_chat_blocks(...)
+    gradio_session_turn.py  # Starlette 会话中的活跃 turn_id
     gradio_themes.py     # business / warm / minimal 主题
+    message_model.py     # Gradio 按 type 格式化会话消息
   routes/                # chat_pages、chat_stream（SSE）、sessions（Redis 开启时）
   services/
     call_llm.py          # stream_chat、stream_chat_chunks、路由与回落
+    llm_transport.py     # iter_chat_text_deltas：local / HTTP 微服务统一入口
     call_deepseek.py     # DeepSeek 客户端
     call_ollama.py       # Ollama 客户端
     llm_chunks.py        # ChatStreamChunk（M2）
     llm_models.py        # list_chat_model_names（M2）
     chat_prompt.md       # CHAT_MODE=prompt_template：{historical_message}、{current_query}
     prompt_render.py     # 读模板、按轮拼 Markdown 历史
-scripts/run.py           # 开发启动（reload）
-tests/                   # unittest（test_llm_chunks、test_session_store、test_prompt_render）
+scripts/
+  run.py                 # 开发启动（reload）
+  smoke_llm_http_stream.py  # 对 LLM 微服务 SSE 的冒烟脚本
+tests/                   # unittest（含 test_llm_transport、test_sessions_api、test_turn_lifecycle 等）
 tasks/                   # 设计文档、里程碑、参考图
 ```
