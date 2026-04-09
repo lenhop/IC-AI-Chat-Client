@@ -5,8 +5,8 @@
 | 能力 | 说明 |
 |------|------|
 | **一体运行** | 同一进程：`Uvicorn` + Gradio + LLM 封装，浏览器即用。 |
-| **Python 集成** | `app.integrations`（`RuntimeConfig`、`stream_chat`、`stream_chat_chunks`、`list_chat_model_names`、`complete_chat`）；或 `app.ui.gradio_chat.build_gradio_chat_blocks` 挂载同款 UI。 |
-| **不推荐** | 把 `POST /api/chat/stream` 当作对外稳定公共 API。 |
+| **Python 集成** | `app.integrations`（`RuntimeConfig`、`stream_chat`、`stream_chat_chunks`、`list_chat_model_names`、`complete_chat`）；或 `app.ui.gradio_chat.mount_gradio_chat_app` 挂载同款 UI。 |
+| **推荐集成方式** | 直接使用 `app.integrations`（`RuntimeConfig` + `stream_chat/complete_chat`）对接能力。 |
 
 设计与键空间等说明见 [`tasks/`](tasks/)（如 `project_goal.md`）。
 
@@ -27,7 +27,7 @@ Conda 示例：
 /opt/miniconda3/bin/python -m pip install -r requirements.txt
 ```
 
-主要依赖：`fastapi`、`uvicorn`、`gradio`、`jinja2`、`python-dotenv`、`httpx`、`openai`、`redis`；测试使用 `fakeredis`。Pydantic v2 随 FastAPI 安装。
+主要依赖：`fastapi`、`uvicorn`、`gradio`、`python-dotenv`、`httpx`、`openai`、`redis`；测试使用 `fakeredis`。Pydantic v2 随 FastAPI 安装。
 
 ---
 
@@ -95,7 +95,7 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 | 留空 | 与 `business` 相同。 |
 | 非法值 | 若**显式设置了错误取值**，启动时在 `validate_standalone_env` 阶段 **RuntimeError**。 |
 
-代码中可用 `build_gradio_chat_blocks(theme="warm")` **覆盖**环境变量。
+代码中推荐用 `mount_gradio_chat_app(..., theme="warm")` 覆盖环境变量。`build_gradio_chat_blocks(...)` 为低层构建接口，仅在你需要自行控制挂载细节时使用。
 
 ### 2.4 服务监听
 
@@ -103,7 +103,7 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 
 ### 2.5 Redis 与会话
 
-- **默认**：`REDIS_ENABLED=false`。不连 Redis，不注册 `POST /api/sessions` 等会话路由。
+- **默认**：`REDIS_ENABLED=false`。不连 Redis，Gradio 以内存态运行。
 - **开启 Redis**：`REDIS_ENABLED=true` 且配置可用 `REDIS_URL`。启动时会 `ping`；失败则进程直接报错退出。
 - **键前缀**：`REDIS_KEY_PREFIX`（默认 `icai:`），会话键形如 `{prefix}session:{uuid}:meta` / `:messages`（细节见 `project_goal.md` §2.3）。
 - **TTL**：`REDIS_SESSION_TTL_SECONDS`（默认 30 天）；有写入时会续期。
@@ -113,8 +113,7 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 - **单条消息 JSON**（`messages` 列表里每项）必填：`user_id`、`session_id`、`type`、`content`、`timestamp`、`turn_id`。常见 `type`：`query`、`answer`、`clarification`、`rewriting`、`classification`、`reason`、`plan`、`context`、`dispatcher`。
 - **旧数据**：不支持仅 `role`/`ts` 的旧行。库里有遗留数据时，请先清空对应 key 或离线迁移再升级。
 - **可选类型是否在气泡里显示**：7 个 `*_MESSAGE_DISPLAY_ENABLE`（见 `.env.example`）。`query`/`answer` 始终显示。开关只影响 Gradio；`prompt_template` 拼进模型的历史仍含全部类型。
-- **会话 API**（内置调试用）：`POST /api/sessions` 创建；`GET /api/sessions/{session_id}/messages` 拉取；`POST /api/sessions/{session_id}/messages` 按条追加（Body：`type`、`content`、`turn_id`，与 `USER_ID` 校验）。越权 403，无会话 404。
-- **写回（Gradio + Redis）**：用户发送即写入 `query`（Starlette 会话中保留活跃 `turn_id`）；流式**成功**后写入 `answer` 并清除该 `turn_id`；**失败**不写 `answer`。Legacy 页面 `POST /api/chat/stream` 在整轮成功后按同一 `turn_id` 依次写入 `query` 与 `answer`。
+- **写回（Gradio + Redis）**：用户发送即写入 `query`（Starlette 会话中保留活跃 `turn_id`）；流式**成功**后写入 `answer` 并清除该 `turn_id`；**失败**不写 `answer`。
 - **`app.integrations`**：始终多轮 `stream_chat(messages=...)`，不受 `prompt_template` 影响。
 - **安全**：`session_id` 可能泄露；当前只比对 meta 与 `.env` 的 `USER_ID`。公网勿把 `USER_ID` 当多租户边界（见 `project_goal.md` §2.4、§5）。
 
@@ -159,9 +158,8 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `/` | **302** 重定向到 Gradio。 |
 | `/gradio` | **主聊天界面**（气泡布局）。 |
 | `/docs` | FastAPI OpenAPI（若未关闭）。 |
-| `/legacy` | 旧版 Jinja + 前端 SSE 聊天页（仍使用 `POST /api/chat/stream`）。 |
 
-`REDIS_ENABLED=true` 时，OpenAPI 中还可看到 **`POST /api/sessions`**、**`GET/POST /api/sessions/{session_id}/messages`**（与内置页 / 调试配合使用）。验证 Gradio 气泡交互不建议手写 curl；需要时可使用 **`gradio_client`** 或 Playwright 等做 UI 层冒烟。
+验证 Gradio 气泡交互不建议手写 curl；需要时可使用 **`gradio_client`** 或 Playwright 等做 UI 层冒烟。
 
 ### 场景示例
 
@@ -238,9 +236,9 @@ messages = normalize_messages(
 print(complete_chat(messages, runtime=cfg))
 ```
 
-### 6.2 同款 Gradio UI：`build_gradio_chat_blocks`
+### 6.2 同款 Gradio UI（推荐）：`mount_gradio_chat_app`
 
-从 `app.ui.gradio_chat` 导入；须先 `load_dotenv` 并调用 `validate_standalone_env()`（或与主应用一致的 env），再 `gr.mount_gradio_app(app, build_gradio_chat_blocks(), path="/gradio")`。
+从 `app.ui.gradio_chat` 导入；须先 `load_dotenv` 并调用 `validate_standalone_env()`（或与主应用一致的 env），再 `mount_gradio_chat_app(app, path="/gradio")`。该 Facade 会在挂载时注入主题与 CSS，兼容 Gradio 6 参数迁移。
 
 **易错点**
 
@@ -254,7 +252,6 @@ print(complete_chat(messages, runtime=cfg))
 from pathlib import Path
 
 from dotenv import load_dotenv
-import gradio as gr
 import uvicorn
 from fastapi import FastAPI
 
@@ -263,14 +260,19 @@ from app.config import validate_standalone_env
 
 validate_standalone_env()
 
-from app.ui.gradio_chat import build_gradio_chat_blocks
+from app.ui.gradio_chat import mount_gradio_chat_app
 
 app = FastAPI()
-gr.mount_gradio_app(app, build_gradio_chat_blocks(), path="/gradio")
+mount_gradio_chat_app(app, path="/gradio")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
 ```
+
+低层接口说明：
+
+- `build_gradio_chat_blocks(...)`：仅返回 `gr.Blocks`，**不负责**在 Gradio 6 场景下注入最终挂载样式参数。
+- 除非你有明确的自定义挂载需求，否则请优先使用 `mount_gradio_chat_app(...)`。
 
 **可选参数（v3）**
 
@@ -310,7 +312,7 @@ if __name__ == "__main__":
   ```
   开发阶段仍推荐 `uvicorn app.main:app --reload`。Worker 数与超时需按 LLM 流式耗时调整。
 - **健康检查**：可对外暴露 FastAPI 自带 `GET /docs` 或自建 `/health`（按需添加路由）。
-- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（含 `test_llm_transport`、`test_turn_lifecycle`、`test_sessions_api`、`test_session_store` 等；fakeredis，无 live LLM）。
+- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（含 `test_llm_transport`、`test_turn_lifecycle`、`test_main_routes`、`test_session_store` 等；fakeredis，无 live LLM）。
 
 ---
 
@@ -318,7 +320,7 @@ if __name__ == "__main__":
 
 ```text
 app/
-  main.py              # FastAPI 入口、lifespan Redis、SessionMiddleware（M3）、挂载 Gradio / 静态资源 / 路由
+  main.py              # FastAPI 入口、lifespan Redis、SessionMiddleware（M3）、挂载 Gradio
   config.py            # AppConfig、RedisSettings、validate_standalone_env、get_gradio_ui_theme
   deps.py              # require_session_store（M3）
   integrations.py      # 对外 LLM 稳定导出
@@ -327,11 +329,14 @@ app/
   llm_service/
     main.py            # LLM Worker：POST /v1/chat/stream（SSE，默认拆分口径）
   ui/
-    gradio_chat.py     # Gradio 主链路：query即时落库、stage消息回调落库、answer收尾
+    gradio_chat.py     # Facade：统一构建与挂载 Gradio UI
+    gradio_layout.py   # 页面结构与组件装配
+    gradio_handlers.py # 输入/流式回调/异常处理
+    gradio_persistence.py # session 与 Redis 持久化
     gradio_session_turn.py  # Starlette 会话中的活跃 turn_id
     gradio_themes.py   # business / warm / minimal 主题
     message_model.py   # Gradio 按 type 格式化会话消息
-  routes/              # chat_pages、chat_stream（SSE）、sessions（Redis 开启时）
+  routes/              # chat_pages（根路径重定向到 /gradio）
   services/
     call_llm.py        # 本地 LLM 能力（stream_chat / stream_chat_chunks）
     llm_transport.py   # UI/SSE 统一接口（校验、local/http流式、stage消息回调）
@@ -344,9 +349,9 @@ app/
 scripts/
   run.py               # 开发启动（reload）
   smoke_llm_http_stream.py  # 对 LLM 微服务 SSE 的冒烟脚本
-tests/                 # unittest（含阶段落库、chat_stream持久化、llm_service路由级流式、依赖边界等）
+tests/                 # unittest（含 Gradio 落库、llm_service 路由级流式、依赖边界等）
   test_gradio_stage_persist.py     # P0：stage消息实时写Redis与同turn_id
-  test_chat_stream_persist.py      # P0：chat_stream主路径append_memory_message
+  test_main_routes.py              # P0：主入口与下线路由行为验证
   test_llm_service_stream_api.py   # P1：/v1/chat/stream 真实端点SSE测试
   test_gradio_chat_dependencies.py # P2：UI不直接依赖call_llm细节
 tasks/                 # 设计文档、里程碑、参考图（含 m3_plan_v3.2*.md）

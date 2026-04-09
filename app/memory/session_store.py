@@ -2,8 +2,8 @@
 Session meta + typed message list in Redis (M3).
 
 Each list element is JSON with required fields: ``user_id``, ``session_id``, ``type``,
-``content``, ``timestamp``, ``turn_id``. Legacy ``role``/``ts`` rows are **not** read
-(M3 v3.1 option B); upgrade Redis or clear old lists. Key helpers live here;
+``content``, ``timestamp``, ``turn_id``. Historical non-canonical ``role``/``ts`` rows are **not** read
+(M3 v3.1 option B); migrate Redis data or clear old lists. Key helpers live here;
 naming aligns with tasks/project_goal.md §2.3.
 """
 
@@ -108,7 +108,7 @@ def normalize_stored_message(
     """
     Normalize one Redis JSON object to canonical typed shape (strict).
 
-    Requires non-empty ``type`` and ``timestamp``. Does not support legacy ``role``/``ts``.
+    Requires non-empty ``type`` and ``timestamp``. Does not support historical ``role``/``ts`` rows.
 
     Args:
         obj: Parsed JSON value (must be a dict).
@@ -116,7 +116,7 @@ def normalize_stored_message(
         owner_user_id: Meta user_id used when ``user_id`` is missing on the object.
 
     Returns:
-        Canonical dict or ``None`` if invalid or legacy-only payload.
+        Canonical dict or ``None`` if invalid or historical non-canonical payload.
 
     Example:
         >>> normalize_stored_message(

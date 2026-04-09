@@ -96,7 +96,7 @@ def theme_header_html(cfg: AppConfig, theme: GradioUiTheme) -> str:
     · 模型 <code style="background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:4px;">{model_label}</code>
     · 用户 <code style="background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:4px;">{cfg.user_id}</code>
   </div>
-  <div style="opacity:0.85;font-size:0.82rem;margin-top:8px;">Jinja 旧版：<a href="/legacy" style="color:#bfdbfe;">/legacy</a></div>
+  <div style="opacity:0.85;font-size:0.82rem;margin-top:8px;">主入口：<a href="/gradio" style="color:#bfdbfe;">/gradio</a></div>
 </div>
 """
     if theme == "warm":
@@ -109,13 +109,13 @@ def theme_header_html(cfg: AppConfig, theme: GradioUiTheme) -> str:
     &nbsp;·&nbsp;模型 {model_label}
     &nbsp;·&nbsp;{cfg.user_id}
   </div>
-  <div style="margin-top:10px;font-size:0.82rem;"><a href="/legacy" style="color:#e11d48;">经典网页版</a></div>
+  <div style="margin-top:10px;font-size:0.82rem;"><a href="/gradio" style="color:#e11d48;">Gradio 主界面</a></div>
 </div>
 """
     # minimal
     return (
         f"**后端** `{cfg.llm_backend}` · **模型** `{model_label}` · **用户** `{cfg.user_id}`  \n"
-        "Jinja 旧版：[打开 `/legacy`](/legacy)"
+        "主入口：[打开 `/gradio`](/gradio)"
     )
 
 

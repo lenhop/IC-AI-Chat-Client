@@ -9,7 +9,7 @@ import fakeredis
 
 from app.config import RedisSettings
 from app.memory.session_store import SessionStore
-from app.ui.gradio_chat import _persist_stage_message
+from app.ui.gradio_persistence import GradioPersistenceService
 from app.ui.gradio_session_turn import GradioSessionTurn
 
 
@@ -63,18 +63,18 @@ class GradioStagePersistTests(unittest.TestCase):
 
     def test_same_turn_id_order_query_plan_reason_answer(self) -> None:
         with patch(
-            "app.ui.gradio_chat.get_redis_for_gradio",
+            "app.ui.gradio_persistence.get_redis_for_gradio",
             return_value=(self.client, _rs()),
         ):
             self._append_query("user asks")
-            _persist_stage_message(
+            GradioPersistenceService.persist_stage_message(
                 self.session_id,
                 self.request,
                 user_id="u1",
                 message_type="plan",
                 content="  first plan  ",
             )
-            _persist_stage_message(
+            GradioPersistenceService.persist_stage_message(
                 self.session_id,
                 self.request,
                 user_id="u1",
@@ -95,18 +95,18 @@ class GradioStagePersistTests(unittest.TestCase):
 
     def test_stage_messages_exist_before_answer(self) -> None:
         with patch(
-            "app.ui.gradio_chat.get_redis_for_gradio",
+            "app.ui.gradio_persistence.get_redis_for_gradio",
             return_value=(self.client, _rs()),
         ):
             self._append_query("user asks")
-            _persist_stage_message(
+            GradioPersistenceService.persist_stage_message(
                 self.session_id,
                 self.request,
                 user_id="u1",
                 message_type="plan",
                 content="draft plan",
             )
-            _persist_stage_message(
+            GradioPersistenceService.persist_stage_message(
                 self.session_id,
                 self.request,
                 user_id="u1",
@@ -122,18 +122,18 @@ class GradioStagePersistTests(unittest.TestCase):
 
     def test_empty_stage_content_is_ignored(self) -> None:
         with patch(
-            "app.ui.gradio_chat.get_redis_for_gradio",
+            "app.ui.gradio_persistence.get_redis_for_gradio",
             return_value=(self.client, _rs()),
         ):
             self._append_query("user asks")
-            _persist_stage_message(
+            GradioPersistenceService.persist_stage_message(
                 self.session_id,
                 self.request,
                 user_id="u1",
                 message_type="plan",
                 content="   ",
             )
-            _persist_stage_message(
+            GradioPersistenceService.persist_stage_message(
                 self.session_id,
                 self.request,
                 user_id="u1",

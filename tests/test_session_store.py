@@ -69,8 +69,8 @@ class SessionStoreTests(unittest.TestCase):
         gradio_rows = gradio_history_from_stored(raw)
         self.assertEqual(len(gradio_rows), 2)
 
-    def test_legacy_role_based_skipped_in_get_messages(self) -> None:
-        """Option B: role/ts rows are not normalized and are dropped on read."""
+    def test_historical_role_based_skipped_in_get_messages(self) -> None:
+        """Option B: historical role/ts rows are not normalized and are dropped on read."""
         sid = self._store.create_session("u1", "deepseek")
         msg_k = f"test:session:{sid}:messages"
         legacy = json.dumps({"role": "user", "content": "old", "ts": 1700000000})

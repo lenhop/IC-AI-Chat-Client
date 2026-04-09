@@ -3,10 +3,8 @@ FastAPI application entry.
 
 Key points:
 1) Standalone: load only this repo's ``PROJECT_ROOT/.env`` (missing file -> raise).
-2) Mount static assets for the legacy Jinja page at ``/legacy``.
-3) Mount Gradio chat UI at ``/gradio``; ``GET /`` redirects to Gradio.
-4) Register chat SSE route for the legacy UI (``internal_ui``).
-5) M3: optional Redis in ``lifespan``; session routes when ``REDIS_ENABLED=true``.
+2) Mount Gradio chat UI at ``/gradio``; ``GET /`` redirects to Gradio.
+3) M3: optional Redis in ``lifespan`` for Gradio history/session persistence.
 
 Library integration does not use this module: import ``app.integrations`` and pass
 ``RuntimeConfig`` to ``stream_chat`` / ``complete_chat``.
@@ -18,13 +16,15 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import gradio as gr
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_redis_settings, validate_standalone_env
+from app.memory.redis_pool import close_redis_client, create_sync_redis_client
+from app.memory.redis_runtime import bind_redis_for_gradio, clear_redis_for_gradio
+from app.routes.chat_pages import router as chat_pages_router
+from app.ui.gradio_chat import mount_gradio_chat_app
 
 
 def _sanitize_redis_url(url: str) -> str:
@@ -39,16 +39,10 @@ def _sanitize_redis_url(url: str) -> str:
         except (IndexError, ValueError):
             return "redis://***"
     return u
-from app.memory.redis_pool import close_redis_client, create_sync_redis_client
-from app.memory.redis_runtime import bind_redis_for_gradio, clear_redis_for_gradio
-from app.routes.chat_pages import router as chat_pages_router
-from app.routes.chat_stream import router as chat_router
-from app.ui.gradio_chat import build_gradio_chat_blocks
 
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-STATIC_DIR = BASE_DIR / "static"
 ENV_FILE = PROJECT_ROOT / ".env"
 
 # Standalone policy: exactly one env file at repository root (no cwd / parent fallback).
@@ -96,7 +90,7 @@ app = FastAPI(
     title="IC-AI-Chat-Client",
     version="0.4.0",
     description=(
-        "FastAPI + Gradio chat UI with DeepSeek/Ollama; optional Redis sessions (M3). "
+        "FastAPI + Gradio chat UI with DeepSeek/Ollama; optional Redis persistence (M3). "
         f"Loaded env from {ENV_FILE}."
     ),
     lifespan=lifespan,
@@ -107,15 +101,5 @@ if _REDIS_BOOTSTRAP.enabled:
     _secret = (os.getenv("SECRET_KEY") or "").strip() or "change-me-to-a-random-secret"
     app.add_middleware(SessionMiddleware, secret_key=_secret)
 
-# Legacy Jinja chat page uses /static assets.
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
 app.include_router(chat_pages_router)
-app.include_router(chat_router)
-
-if _REDIS_BOOTSTRAP.enabled:
-    from app.routes.sessions import router as sessions_router
-
-    app.include_router(sessions_router)
-
-gr.mount_gradio_app(app, build_gradio_chat_blocks(), path="/gradio")
+mount_gradio_chat_app(app, path="/gradio")

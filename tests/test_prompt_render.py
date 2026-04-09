@@ -74,7 +74,7 @@ class TestSplitAndSelect(unittest.TestCase):
         self.assertEqual(len(rounds[0]), 3)
 
     def test_split_mixed_turn_id_falls_back_to_query_boundaries(self) -> None:
-        """Blank ``turn_id`` on any row => legacy query-started rounds."""
+        """Blank ``turn_id`` on any row => historical compatibility query-started rounds."""
         tid = "22222222-2222-2222-2222-222222222222"
         msgs = [
             _msg("query", "q1", turn_id=""),

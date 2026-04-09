@@ -59,7 +59,7 @@ def split_messages_into_rounds(messages: List[Dict[str, Any]]) -> List[List[Dict
 
     When every row has a non-empty ``turn_id``, group consecutive rows that share
     the same ``turn_id`` (multi-query clarifications stay one round). Otherwise
-    fall back to legacy behavior: each new ``type=query`` starts a round.
+    fall back to historical-data compatibility behavior: each new ``type=query`` starts a round.
 
     Args:
         messages: Normalized records (ordered).
