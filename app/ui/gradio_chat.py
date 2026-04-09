@@ -30,8 +30,7 @@ from app.memory.session_store import (
     gradio_history_from_stored,
 )
 from app.runtime_config import RuntimeConfig, validate_runtime_config
-from app.services.call_llm import normalize_messages
-from app.services.llm_transport import iter_chat_text_deltas
+from app.services.llm_transport import iter_chat_text_deltas, validate_or_normalize_messages
 from app.services.prompt_render import (
     format_messages_markdown_for_prompt,
     render_chat_prompt,
@@ -51,6 +50,17 @@ logger = logging.getLogger(__name__)
 
 # Cookie/session key for Gradio browser refresh (paired with SessionMiddleware in main).
 _GRADIO_SESSION_KEY = "icai_gradio_session_id"
+_STAGE_MESSAGE_TYPES = frozenset(
+    {
+        "clarification",
+        "rewriting",
+        "classification",
+        "reason",
+        "plan",
+        "context",
+        "dispatcher",
+    }
+)
 
 
 def _starlette_session_from_gradio(request: gr.Request) -> Any:
@@ -66,6 +76,53 @@ def _clone_message_history(history: Any) -> List[Dict[str, Any]]:
     """Deep-copy Gradio ``type='messages'`` history."""
     history = history or []
     return [dict(cast(Dict[str, Any], m)) for m in history]
+
+
+def _persist_stage_message(
+    session_id: Optional[str],
+    request: gr.Request,
+    *,
+    user_id: str,
+    message_type: str,
+    content: str,
+) -> None:
+    """
+    Append one non-empty stage message to Redis for the active turn.
+
+    This helper writes only typed business-stage rows (not token deltas).
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return
+    mtype = (message_type or "").strip()
+    if mtype not in _STAGE_MESSAGE_TYPES:
+        return
+    text = (content or "").strip()
+    if not text:
+        return
+    client, rs = get_redis_for_gradio()
+    if rs is None or not rs.enabled or client is None:
+        return
+    sess = _starlette_session_from_gradio(request)
+    turn_id = GradioSessionTurn.get_active_turn_id(sess)
+    if not turn_id:
+        return
+    try:
+        SessionStore(client, rs).append_memory_message(
+            sid,
+            user_id,
+            message_type=mtype,
+            content=text,
+            turn_id=turn_id,
+        )
+    except SessionNotFoundError:
+        logger.warning("gradio redis persist stage: session not found %s", sid)
+    except SessionAccessDeniedError:
+        logger.warning("gradio redis persist stage: access denied %s", sid)
+    except ValueError as exc:
+        logger.warning("gradio redis persist stage: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gradio redis persist stage failed: %s", exc)
 
 
 def _messages_for_api(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -236,7 +293,7 @@ def build_gradio_chat_blocks(
 
         api_messages = _messages_for_api(history_list)
         try:
-            normalized = normalize_messages(api_messages)
+            normalized = validate_or_normalize_messages(api_messages)
         except ValueError as exc:
             history_list[-1]["content"] = f"[错误] {exc}"
             yield _clone_message_history(history_list)
@@ -257,7 +314,7 @@ def build_gradio_chat_blocks(
                     hist_subset = select_rounds_for_prompt(stored, resolved_cfg.memory_rounds)
                     hist_md = format_messages_markdown_for_prompt(hist_subset)
                     full = render_chat_prompt(current_query=user_text, historical_message=hist_md)
-                    normalized = normalize_messages([{"role": "user", "content": full}])
+                    normalized = validate_or_normalize_messages([{"role": "user", "content": full}])
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("gradio prompt_template fallback: %s", exc)
 
@@ -265,6 +322,15 @@ def build_gradio_chat_blocks(
         stream_kw: Dict[str, Any] = {"messages": normalized}
         if runtime is not None:
             stream_kw["runtime"] = runtime
+        stream_kw["on_stage_message"] = (
+            lambda message_type, content: _persist_stage_message(
+                session_id,
+                request,
+                user_id=resolved_cfg.user_id,
+                message_type=message_type,
+                content=content,
+            )
+        )
 
         try:
             for delta in iter_chat_text_deltas(**stream_kw):

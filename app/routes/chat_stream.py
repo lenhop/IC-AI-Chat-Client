@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Generator, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
@@ -89,7 +90,21 @@ def _try_persist_session_turn(
     cfg = get_config()
     try:
         store = SessionStore(client, rs)
-        store.append_turn(sid, cfg.user_id, last_user, assistant_text)
+        turn_id = str(uuid.uuid4())
+        store.append_memory_message(
+            sid,
+            cfg.user_id,
+            message_type="query",
+            content=last_user,
+            turn_id=turn_id,
+        )
+        store.append_memory_message(
+            sid,
+            cfg.user_id,
+            message_type="answer",
+            content=assistant_text,
+            turn_id=turn_id,
+        )
     except SessionNotFoundError:
         logger.warning("redis persist: session not found %s", sid)
     except SessionAccessDeniedError:

@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import httpx
 
 from app.config import AppConfig, get_config
 from app.runtime_config import RuntimeConfig
+from app.services.call_llm import normalize_messages as _normalize_messages
 from app.services.call_llm import stream_chat
 
 logger = logging.getLogger(__name__)
+
+StageMessageCallback = Optional[Callable[[str, str], None]]
 
 
 def _iter_http_stream_deltas(
@@ -26,6 +29,7 @@ def _iter_http_stream_deltas(
     *,
     backend: Optional[str],
     model_override: Optional[str],
+    on_stage_message: StageMessageCallback = None,
 ) -> Iterator[str]:
     """
     Stream assistant text chunks from the remote LLM service (SSE ``data:`` JSON lines).
@@ -98,8 +102,99 @@ def _iter_http_stream_deltas(
                         d = obj.get("delta")
                         if isinstance(d, str) and d:
                             yield d
+                        continue
+                    if (
+                        on_stage_message is not None
+                        and isinstance(obj, dict)
+                        and isinstance(obj.get("content"), str)
+                    ):
+                        mtype = obj.get("message_type") or obj.get("type") or obj.get("stage")
+                        if isinstance(mtype, str) and mtype.strip():
+                            try:
+                                on_stage_message(mtype, obj["content"])
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("llm_transport stage callback failed: %s", exc)
     except httpx.HTTPError as exc:
         raise RuntimeError(f"LLM HTTP transport request failed: {exc}") from exc
+
+
+class LlmTransportFacade:
+    """Unified service interface for UI/SSE callers."""
+
+    @classmethod
+    def validate_or_normalize_messages(
+        cls,
+        messages: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        """
+        Validate and normalize OpenAI-style chat messages.
+
+        Raises:
+            ValueError: When messages are malformed.
+        """
+        try:
+            return _normalize_messages(messages)
+        except ValueError as exc:
+            logger.warning("llm_transport invalid messages: %s", exc)
+            raise
+
+    @classmethod
+    def iter_chat_text_deltas(
+        cls,
+        messages: List[Dict[str, str]],
+        *,
+        backend: Optional[str] = None,
+        model_override: Optional[str] = None,
+        runtime: Optional[RuntimeConfig] = None,
+        on_stage_message: StageMessageCallback = None,
+    ) -> Iterator[str]:
+        """
+        Yield assistant-visible text deltas (same contract as :func:`stream_chat`).
+
+        Args:
+            messages: Chat turns in OpenAI shape.
+            backend: Optional backend hint (ignored when ``runtime`` is set).
+            model_override: Optional model id (ignored when ``runtime`` is set).
+            runtime: When set, always use in-process streaming with this config.
+
+        Yields:
+            Concatenable assistant text fragments.
+
+        Raises:
+            ValueError: When message normalization fails (local path only).
+            RuntimeError: When HTTP transport or upstream LLM fails.
+        """
+        if runtime is not None:
+            yield from stream_chat(
+                messages,
+                backend=backend,
+                model_override=model_override,
+                runtime=runtime,
+            )
+            return
+
+        cfg = get_config()
+        transport = (cfg.llm_transport or "local").strip().lower()
+        if transport == "http":
+            yield from _iter_http_stream_deltas(
+                cfg,
+                messages,
+                backend=backend,
+                model_override=model_override,
+                on_stage_message=on_stage_message,
+            )
+            return
+
+        yield from stream_chat(
+            messages,
+            backend=backend,
+            model_override=model_override,
+        )
+
+
+def validate_or_normalize_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Backward-compatible module wrapper for facade validation."""
+    return LlmTransportFacade.validate_or_normalize_messages(messages)
 
 
 def iter_chat_text_deltas(
@@ -108,45 +203,13 @@ def iter_chat_text_deltas(
     backend: Optional[str] = None,
     model_override: Optional[str] = None,
     runtime: Optional[RuntimeConfig] = None,
+    on_stage_message: StageMessageCallback = None,
 ) -> Iterator[str]:
-    """
-    Yield assistant-visible text deltas (same contract as :func:`stream_chat`).
-
-    Args:
-        messages: Chat turns in OpenAI shape.
-        backend: Optional backend hint (ignored when ``runtime`` is set).
-        model_override: Optional model id (ignored when ``runtime`` is set).
-        runtime: When set, always use in-process streaming with this config.
-
-    Yields:
-        Concatenable assistant text fragments.
-
-    Raises:
-        ValueError: When message normalization fails (local path only).
-        RuntimeError: When HTTP transport or upstream LLM fails.
-    """
-    if runtime is not None:
-        yield from stream_chat(
-            messages,
-            backend=backend,
-            model_override=model_override,
-            runtime=runtime,
-        )
-        return
-
-    cfg = get_config()
-    transport = (cfg.llm_transport or "local").strip().lower()
-    if transport == "http":
-        yield from _iter_http_stream_deltas(
-            cfg,
-            messages,
-            backend=backend,
-            model_override=model_override,
-        )
-        return
-
-    yield from stream_chat(
+    """Backward-compatible module wrapper for facade streaming."""
+    yield from LlmTransportFacade.iter_chat_text_deltas(
         messages,
         backend=backend,
         model_override=model_override,
+        runtime=runtime,
+        on_stage_message=on_stage_message,
     )

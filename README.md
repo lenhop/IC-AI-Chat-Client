@@ -49,14 +49,28 @@ cp .env.example .env
 
 其它常用项：`DEEPSEEK_LLM_MODEL`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_REQUEST_TIMEOUT`、`OLLAMA_REQUEST_TIMEOUT`、`USER_ID`、`SESSION_ID` 等，见 `.env.example`。
 
-### 2.2 双进程 LLM（可选，`LLM_TRANSPORT`）
+### 2.2 默认拆分口径（验收按 `LLM_TRANSPORT=http`）
+
+口径说明（避免歧义）：
+
+- 代码能力：同时支持 `local` 与 `http`。
+- 验收/部署默认：按双进程 HTTP（UI -> LLM Service）。
+- 开发回退：`LLM_TRANSPORT=local` 仅用于本地开发和排障，不作为默认验收口径。
 
 | 变量 | 说明 |
 |------|------|
-| `LLM_TRANSPORT` | `local`（默认）：本进程直连 DeepSeek/Ollama。`http`：Gradio 与内置 SSE 仅通过 HTTP 调用独立 LLM 微服务（密钥放在微服务侧 `.env`）。 |
+| `LLM_TRANSPORT` | 推荐/验收默认 `http`：UI 进程仅通过 HTTP 调用独立 LLM 微服务。`local`：本进程直连 DeepSeek/Ollama（仅开发回退）。 |
 | `LLM_SERVICE_URL` | `LLM_TRANSPORT=http` 时**必填**：微服务根 URL，无尾斜杠（如 `http://127.0.0.1:8001`）。 |
 | `LLM_SERVICE_TIMEOUT_SECONDS` | 流式读取超时（秒），默认 `120`。 |
 | `LLM_SERVICE_API_KEY` | 可选；若设置，UI 进程请求微服务时带 `Authorization: Bearer …`。 |
+
+最小可运行示例（默认拆分）：
+
+```env
+# UI process
+LLM_TRANSPORT=http
+LLM_SERVICE_URL=http://127.0.0.1:8001
+```
 
 **微服务进程**（仅加载 LLM 相关环境变量，不连 Redis）：
 
@@ -67,6 +81,11 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 **UI 进程**（`app.main`）：`.env` 中设 `LLM_TRANSPORT=http` 与 `LLM_SERVICE_URL`；启动校验走 `validate_standalone_env` 的 HTTP 分支（不要求本机配置 `DEEPSEEK_API_KEY` / Ollama 变量）。微服务进程仍需通过 `validate_llm_worker_env`（与原先 `LLM_BACKEND` 规则一致）。
 
 流式冒烟（需微服务已启动）：`python scripts/smoke_llm_http_stream.py --url http://127.0.0.1:8001`
+
+常见误区：
+
+- 误区：支持 `http` 等于默认拆分。
+- 正确：验收按 `http`，`local` 只做开发回退。
 
 ### 2.3 Gradio 界面主题
 
@@ -95,7 +114,7 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 - **旧数据**：不支持仅 `role`/`ts` 的旧行。库里有遗留数据时，请先清空对应 key 或离线迁移再升级。
 - **可选类型是否在气泡里显示**：7 个 `*_MESSAGE_DISPLAY_ENABLE`（见 `.env.example`）。`query`/`answer` 始终显示。开关只影响 Gradio；`prompt_template` 拼进模型的历史仍含全部类型。
 - **会话 API**（内置调试用）：`POST /api/sessions` 创建；`GET /api/sessions/{session_id}/messages` 拉取；`POST /api/sessions/{session_id}/messages` 按条追加（Body：`type`、`content`、`turn_id`，与 `USER_ID` 校验）。越权 403，无会话 404。
-- **写回（Gradio + Redis）**：用户发送即写入 `query`（Starlette 会话中保留活跃 `turn_id`）；流式**成功**后写入 `answer` 并清除该 `turn_id`；**失败**不写 `answer`。Legacy 页面 `POST /api/chat/stream` 仍在整轮成功后 `append_turn`（无浏览器 `turn_id` 状态）。
+- **写回（Gradio + Redis）**：用户发送即写入 `query`（Starlette 会话中保留活跃 `turn_id`）；流式**成功**后写入 `answer` 并清除该 `turn_id`；**失败**不写 `answer`。Legacy 页面 `POST /api/chat/stream` 在整轮成功后按同一 `turn_id` 依次写入 `query` 与 `answer`。
 - **`app.integrations`**：始终多轮 `stream_chat(messages=...)`，不受 `prompt_template` 影响。
 - **安全**：`session_id` 可能泄露；当前只比对 meta 与 `.env` 的 `USER_ID`。公网勿把 `USER_ID` 当多租户边界（见 `project_goal.md` §2.4、§5）。
 
@@ -295,7 +314,7 @@ if __name__ == "__main__":
 
 ---
 
-## 9. 仓库结构（速览）
+## 9. 文件组织结构
 
 ```text
 app/
@@ -304,27 +323,31 @@ app/
   deps.py              # require_session_store（M3）
   integrations.py      # 对外 LLM 稳定导出
   runtime_config.py    # RuntimeConfig（库集成）
-  memory/                # redis_pool、session_store、redis_runtime（Gradio 绑定 Redis）
+  memory/              # redis_pool、session_store、redis_runtime（Gradio 绑定 Redis）
   llm_service/
-    main.py              # 可选第二进程：POST /v1/chat/stream（SSE）
+    main.py            # LLM Worker：POST /v1/chat/stream（SSE，默认拆分口径）
   ui/
-    gradio_chat.py       # build_gradio_chat_blocks(...)
+    gradio_chat.py     # Gradio 主链路：query即时落库、stage消息回调落库、answer收尾
     gradio_session_turn.py  # Starlette 会话中的活跃 turn_id
-    gradio_themes.py     # business / warm / minimal 主题
-    message_model.py     # Gradio 按 type 格式化会话消息
-  routes/                # chat_pages、chat_stream（SSE）、sessions（Redis 开启时）
+    gradio_themes.py   # business / warm / minimal 主题
+    message_model.py   # Gradio 按 type 格式化会话消息
+  routes/              # chat_pages、chat_stream（SSE）、sessions（Redis 开启时）
   services/
-    call_llm.py          # stream_chat、stream_chat_chunks、路由与回落
-    llm_transport.py     # iter_chat_text_deltas：local / HTTP 微服务统一入口
-    call_deepseek.py     # DeepSeek 客户端
-    call_ollama.py       # Ollama 客户端
-    llm_chunks.py        # ChatStreamChunk（M2）
-    llm_models.py        # list_chat_model_names（M2）
-    chat_prompt.md       # CHAT_MODE=prompt_template：{historical_message}、{current_query}
-    prompt_render.py     # 读模板、按轮拼 Markdown 历史
+    call_llm.py        # 本地 LLM 能力（stream_chat / stream_chat_chunks）
+    llm_transport.py   # UI/SSE 统一接口（校验、local/http流式、stage消息回调）
+    call_deepseek.py   # DeepSeek 客户端
+    call_ollama.py     # Ollama 客户端
+    llm_chunks.py      # ChatStreamChunk（M2）
+    llm_models.py      # list_chat_model_names（M2）
+    chat_prompt.md     # CHAT_MODE=prompt_template：{historical_message}、{current_query}
+    prompt_render.py   # 读模板、按轮拼 Markdown 历史
 scripts/
-  run.py                 # 开发启动（reload）
+  run.py               # 开发启动（reload）
   smoke_llm_http_stream.py  # 对 LLM 微服务 SSE 的冒烟脚本
-tests/                   # unittest（含 test_llm_transport、test_sessions_api、test_turn_lifecycle 等）
-tasks/                   # 设计文档、里程碑、参考图
+tests/                 # unittest（含阶段落库、chat_stream持久化、llm_service路由级流式、依赖边界等）
+  test_gradio_stage_persist.py     # P0：stage消息实时写Redis与同turn_id
+  test_chat_stream_persist.py      # P0：chat_stream主路径append_memory_message
+  test_llm_service_stream_api.py   # P1：/v1/chat/stream 真实端点SSE测试
+  test_gradio_chat_dependencies.py # P2：UI不直接依赖call_llm细节
+tasks/                 # 设计文档、里程碑、参考图（含 m3_plan_v3.2*.md）
 ```

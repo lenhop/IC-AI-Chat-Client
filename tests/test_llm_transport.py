@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.config import AppConfig
-from app.services.llm_transport import iter_chat_text_deltas
+from app.services.llm_transport import iter_chat_text_deltas, validate_or_normalize_messages
 
 
 def _cfg_http(url: str = "http://127.0.0.1:9") -> AppConfig:
@@ -89,6 +89,70 @@ class TestIterChatTextDeltas(unittest.TestCase):
         mock_http.stream.assert_called_once()
         args, _kwargs = mock_http.stream.call_args
         self.assertIn("/v1/chat/stream", str(args[1]))
+
+    @patch("app.services.llm_transport.httpx.Client")
+    @patch("app.services.llm_transport.get_config")
+    def test_http_stage_callback_keeps_delta_contract(
+        self,
+        mock_gc: MagicMock,
+        mock_client_cls: MagicMock,
+    ) -> None:
+        mock_gc.return_value = _cfg_http("http://worker.example")
+
+        class _StreamCtx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_lines(self):
+                yield 'data: {"type": "plan", "content": "draft plan"}'
+                yield 'data: {"delta": "x"}'
+                yield 'data: {"stage": "reason", "content": "because"}'
+                yield 'data: {"done": true}'
+
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = _StreamCtx()
+        stream_cm.__exit__.return_value = None
+        mock_http = MagicMock()
+        mock_http.stream.return_value = stream_cm
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_http
+        mock_client.__exit__.return_value = None
+        mock_client_cls.return_value = mock_client
+
+        stage_rows = []
+
+        deltas = list(
+            iter_chat_text_deltas(
+                [{"role": "user", "content": "hi"}],
+                on_stage_message=lambda mt, c: stage_rows.append((mt, c)),
+            )
+        )
+        self.assertEqual(deltas, ["x"])
+        self.assertEqual(
+            stage_rows,
+            [("plan", "draft plan"), ("reason", "because")],
+        )
+
+    @patch("app.services.llm_transport._normalize_messages")
+    def test_validate_or_normalize_messages_success(self, mock_norm: MagicMock) -> None:
+        mock_norm.return_value = [{"role": "user", "content": "hi"}]
+        out = validate_or_normalize_messages([{"role": "user", "content": "hi"}])
+        self.assertEqual(out, [{"role": "user", "content": "hi"}])
+        mock_norm.assert_called_once()
+
+    @patch("app.services.llm_transport._normalize_messages")
+    def test_validate_or_normalize_messages_logs_and_raises(self, mock_norm: MagicMock) -> None:
+        mock_norm.side_effect = ValueError("bad")
+        with self.assertLogs("app.services.llm_transport", level="WARNING") as logs:
+            with self.assertRaises(ValueError):
+                validate_or_normalize_messages([{"role": "user", "content": ""}])
+        self.assertTrue(any("invalid messages" in line for line in logs.output))
 
 
 if __name__ == "__main__":

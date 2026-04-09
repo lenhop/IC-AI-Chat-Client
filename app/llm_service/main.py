@@ -76,9 +76,11 @@ async def chat_stream_v1(body: _StreamRequest) -> StreamingResponse:
         normalized = normalize_messages(raw_msgs)
     except ValueError as exc:
         logger.warning("llm_service: invalid messages: %s", exc)
+        err_text = str(exc)
 
         def err_only() -> Generator[str, None, None]:
-            yield _sse_frame({"error": str(exc)})
+            # Capture message text outside except scope for Python 3.11+.
+            yield _sse_frame({"error": err_text})
 
         return StreamingResponse(
             err_only(),
