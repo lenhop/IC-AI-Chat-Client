@@ -80,7 +80,10 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 
 **UI 进程**（`app.main`）：`.env` 中设 `LLM_TRANSPORT=http` 与 `LLM_SERVICE_URL`；启动校验走 `validate_standalone_env` 的 HTTP 分支（不要求本机配置 `DEEPSEEK_API_KEY` / Ollama 变量）。微服务进程仍需通过 `validate_llm_worker_env`（与原先 `LLM_BACKEND` 规则一致）。
 
-流式冒烟（需微服务已启动）：`python scripts/smoke_llm_http_stream.py --url http://127.0.0.1:8001`
+流式冒烟（需微服务已启动）：
+
+- CLI 方式：`python tests/test_smoke_llm_http_stream.py --url http://127.0.0.1:8001`
+- unittest 方式（默认关闭 live 调用）：`ICAI_RUN_LLM_SMOKE=1 python -m unittest tests.test_smoke_llm_http_stream -v`
 
 常见误区：
 
@@ -99,28 +102,42 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 
 ### 2.4 服务监听
 
-`UVICORN_HOST`、`UVICORN_PORT` 由 `scripts/run.py` 读取；直接用 `uvicorn` 命令时也可在命令行指定 `--host` / `--port`。
+`UVICORN_HOST`、`UVICORN_PORT` 可由 `scripts/start_uvicorn.sh` 读取；直接用 `uvicorn` 命令时也可在命令行指定 `--host` / `--port`。
 
 ### 2.5 Redis 与会话
 
-- **默认**：`REDIS_ENABLED=false`。不连 Redis，Gradio 以内存态运行。
-- **开启 Redis**：`REDIS_ENABLED=true` 且配置可用 `REDIS_URL`。启动时会 `ping`；失败则进程直接报错退出。
-- **键前缀**：`REDIS_KEY_PREFIX`（默认 `icai:`），会话键形如 `{prefix}session:{uuid}:meta` / `:messages`（细节见 `project_goal.md` §2.3）。
-- **TTL**：`REDIS_SESSION_TTL_SECONDS`（默认 30 天）；有写入时会续期。
-- **记忆窗口**：`MEMORY_ROUNDS`（默认 `3`）。一轮在 Redis 里通常对应同一 `turn_id` 下的一组消息（可含多条 `query` 澄清）；无 `turn_id` 的旧数据仍按「新 `query` 起一轮」切分。`0` 表示不按轮截断、展示全部已存消息。
-- **对话模式**：`CHAT_MODE=messages`（默认），多轮 `messages` 调 LLM。`prompt_template` 需 `REDIS_ENABLED=true`，模板见 [`chat_prompt.md`](app/services/chat_prompt.md)（`{historical_message}`、`{current_query}`）。
-- **Gradio + Redis**：需在 `.env` 配置足够随机的 **`SECRET_KEY`**（签名 Cookie，刷新后恢复 `icai_gradio_session_id`）。
-- **单条消息 JSON**（`messages` 列表里每项）必填：`user_id`、`session_id`、`type`、`content`、`timestamp`、`turn_id`。常见 `type`：`query`、`answer`、`clarification`、`rewriting`、`classification`、`reason`、`plan`、`context`、`dispatcher`。
-- **旧数据**：不支持仅 `role`/`ts` 的旧行。库里有遗留数据时，请先清空对应 key 或离线迁移再升级。
-- **可选类型是否在气泡里显示**：7 个 `*_MESSAGE_DISPLAY_ENABLE`（见 `.env.example`）。`query`/`answer` 始终显示。开关只影响 Gradio；`prompt_template` 拼进模型的历史仍含全部类型。
-- **写回（Gradio + Redis）**：用户发送即写入 `query`（Starlette 会话中保留活跃 `turn_id`）；流式**成功**后写入 `answer` 并清除该 `turn_id`；**失败**不写 `answer`。
-- **`app.integrations`**：始终多轮 `stream_chat(messages=...)`，不受 `prompt_template` 影响。
-- **安全**：`session_id` 可能泄露；当前只比对 meta 与 `.env` 的 `USER_ID`。公网勿把 `USER_ID` 当多租户边界（见 `project_goal.md` §2.4、§5）。
+- **开关**：默认 `REDIS_ENABLED=false`（不连 Redis）；启用时必须配置可用 `REDIS_URL`，启动会 `ping` 校验，失败直接退出。
+- **关键参数**：`REDIS_KEY_PREFIX`（默认 `icai:`）、`REDIS_SESSION_TTL_SECONDS`（默认 30 天）、`MEMORY_ROUNDS`（默认 3，`0` 表示不截断历史）。
+- **会话键格式**：`{prefix}session:{uuid}:meta` 与 `:messages`。
+- **模式约束**：`CHAT_MODE=prompt_template` 依赖 Redis（模板见 [`chat_prompt.md`](app/services/chat_prompt.md)）。
+- **写回时机（Gradio）**：用户发送先写 `query`；流式成功后写 `answer` 并清理活跃 `turn_id`；失败不写 `answer`。
+- **安全边界**：公网场景不要把 `USER_ID` 当多租户安全边界。
 
 本地 Redis 示例：
 
 ```bash
 docker run -d --name icai-redis -p 6379:6379 redis:7-alpine
+```
+
+#### Redis 运维：`redis_manage_ops.py`
+
+用于查看/筛选/清理会话消息（默认读取仓库根 `.env` 的 `REDIS_URL`）。
+
+```bash
+# 1) 查看单个会话最近 10 条
+python -m app.memory.redis_manage_ops --session-id <session_id> -n 10
+
+# 2) 按用户查看最近 20 条（跨会话聚合）
+python -m app.memory.redis_manage_ops --user-id local-dev -n 20
+
+# 3) 仅看某类型（例如 query）
+python -m app.memory.redis_manage_ops --user-id local-dev -n 20 --type query
+
+# 4) 清空某会话全部消息
+python -m app.memory.redis_manage_ops --session-id <session_id> --clear
+
+# 5) 仅删除某会话最后 N 条 answer
+python -m app.memory.redis_manage_ops --session-id <session_id> --clear -n 3 --type answer
 ```
 
 ---
@@ -140,7 +157,23 @@ docker run -d --name icai-redis -p 6379:6379 redis:7-alpine
 
 **前提**：在仓库根目录（或 `PYTHONPATH` 含该根目录）执行，且根目录已有合法 `.env`。
 
-启动或重启服务：
+启动或重启服务（推荐）：
+
+```bash
+./scripts/start_uvicorn.sh
+```
+
+可选环境变量：
+
+- `UVICORN_HOST`（默认 `0.0.0.0`）
+- `UVICORN_PORT`（默认 `8000`）
+- `START_UVICORN_RELEASE_TIMEOUT_SECONDS`（默认 `20`）
+
+风险提示：
+
+- `start_uvicorn.sh` 会尝试结束目标端口上的任意 LISTEN 进程（先 `SIGTERM`，必要时 `SIGKILL`），请仅在本地开发环境使用并确认端口用途。
+
+直接使用 uvicorn 命令（备选）：
 
 ```bash
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -167,7 +200,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - **远程 Ollama**：`OLLAMA_BASE_URL=http://内网IP:11434` + 上述三个 Ollama 必填项。  
 - **换皮肤**：`.env` 中设置 `GRADIO_UI_THEME=warm` 或 `minimal` 后重启。
 
-若 **`Address already in use`**：换端口（如 `8001`）或结束占用该端口的旧 `uvicorn` 进程。
+若 **`Address already in use`**：换端口（如 `8001`）或使用 `./scripts/start_uvicorn.sh` 自动释放端口后重启。
 
 ---
 
@@ -347,9 +380,9 @@ app/
     chat_prompt.md     # CHAT_MODE=prompt_template：{historical_message}、{current_query}
     prompt_render.py   # 读模板、按轮拼 Markdown 历史
 scripts/
-  run.py               # 开发启动（reload）
-  smoke_llm_http_stream.py  # 对 LLM 微服务 SSE 的冒烟脚本
+  start_uvicorn.sh     # 开发启动（自动释放端口后 exec uvicorn）
 tests/                 # unittest（含 Gradio 落库、llm_service 路由级流式、依赖边界等）
+  test_smoke_llm_http_stream.py     # LLM HTTP SSE 冒烟（默认门控，不在 discover 中自动 live 调用）
   test_gradio_stage_persist.py     # P0：stage消息实时写Redis与同turn_id
   test_main_routes.py              # P0：主入口与下线路由行为验证
   test_llm_service_stream_api.py   # P1：/v1/chat/stream 真实端点SSE测试

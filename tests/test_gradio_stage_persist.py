@@ -143,6 +143,44 @@ class GradioStagePersistTests(unittest.TestCase):
             rows = self.store.get_messages(self.session_id, "u1")
             self.assertEqual([row.get("type") for row in rows], ["query"])
 
+    def test_persist_answer_finishes_turn_and_clears_active_turn_id(self) -> None:
+        """Successful answer persistence should reuse current turn and clear lifecycle state."""
+        with patch(
+            "app.ui.gradio_persistence.get_redis_for_gradio",
+            return_value=(self.client, _rs()),
+        ):
+            self._append_query("user asks")
+            GradioPersistenceService.persist_answer_and_finish_turn(
+                self.session_id,
+                self.request,
+                user_id="u1",
+                assistant_text="final answer",
+            )
+
+        rows = self.store.get_messages(self.session_id, "u1")
+        self.assertEqual([row.get("type") for row in rows], ["query", "answer"])
+        self.assertEqual(rows[0].get("turn_id"), rows[1].get("turn_id"))
+        self.assertEqual(GradioSessionTurn.get_active_turn_id(self.session), "")
+
+    def test_persist_answer_without_active_turn_id_is_ignored(self) -> None:
+        """Answer persistence should be skipped when there is no active turn id."""
+        no_turn_session: dict = {}
+        request_without_turn = _GradioRequestStub(no_turn_session)
+        with patch(
+            "app.ui.gradio_persistence.get_redis_for_gradio",
+            return_value=(self.client, _rs()),
+        ):
+            self._append_query("user asks")
+            GradioPersistenceService.persist_answer_and_finish_turn(
+                self.session_id,
+                request_without_turn,
+                user_id="u1",
+                assistant_text="final answer",
+            )
+
+        rows = self.store.get_messages(self.session_id, "u1")
+        self.assertEqual([row.get("type") for row in rows], ["query"])
+
 
 if __name__ == "__main__":
     unittest.main()

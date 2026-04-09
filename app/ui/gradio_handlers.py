@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Generator, List, Optional, Tuple, cast
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import gradio as gr
 
@@ -18,10 +18,38 @@ class GradioHandlerService:
     """User/assistant handler methods for Gradio event pipeline."""
 
     @classmethod
-    def clone_message_history(cls, history: Any) -> List[Dict[str, Any]]:
-        """Deep-copy chat history rows as mutable dict list."""
+    def _normalize_chat_row(cls, item: Any) -> Optional[Dict[str, str]]:
+        """
+        Normalize one history item to Gradio ``messages`` format.
+
+        Gradio versions may pass richer objects or malformed rows in callback
+        history. This helper keeps only valid ``{role, content}`` rows and
+        coerces content into string to prevent format compatibility failures.
+        """
+        role: Any = None
+        content: Any = None
+        if isinstance(item, dict):
+            role = item.get("role")
+            content = item.get("content")
+        else:
+            role = getattr(item, "role", None)
+            content = getattr(item, "content", None)
+
+        role_text = str(role or "").strip()
+        if role_text not in {"system", "user", "assistant"}:
+            return None
+        return {"role": role_text, "content": str(content or "")}
+
+    @classmethod
+    def clone_message_history(cls, history: Any) -> List[Dict[str, str]]:
+        """Normalize and deep-copy chat history rows as mutable dict list."""
         base = history or []
-        return [dict(cast(Dict[str, Any], item)) for item in base]
+        out: List[Dict[str, str]] = []
+        for item in base:
+            row = cls._normalize_chat_row(item)
+            if row is not None:
+                out.append(row)
+        return out
 
     @classmethod
     def messages_for_api(cls, history: List[Dict[str, Any]]) -> List[Dict[str, str]]:

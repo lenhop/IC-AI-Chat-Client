@@ -8,6 +8,8 @@ responsibilities to layout, handler, and persistence services.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
+import logging
 from typing import Optional
 
 import gradio as gr
@@ -26,6 +28,8 @@ from app.ui.gradio_themes import (
     theme_header_html,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class GradioChatBuildContext:
@@ -41,6 +45,21 @@ class GradioChatBuildContext:
 
 class GradioChatFacade:
     """Single facade interface for building and mounting Gradio chat."""
+
+    @classmethod
+    def _mount_supports_theme_css(cls) -> bool:
+        """
+        Return whether ``gr.mount_gradio_app`` accepts ``theme`` and ``css`` kwargs.
+
+        Some installed Gradio builds expose a mount signature without these
+        parameters. In that case we must omit them to avoid ``TypeError``.
+        """
+        try:
+            params = inspect.signature(gr.mount_gradio_app).parameters
+        except (TypeError, ValueError) as exc:
+            logger.warning("Unable to inspect gr.mount_gradio_app signature: %s", exc)
+            return False
+        return "theme" in params and "css" in params
 
     @classmethod
     def _resolve_context(
@@ -160,13 +179,16 @@ class GradioChatFacade:
         """Mount Gradio chat under FastAPI with Gradio 6-compatible theme/css injection."""
         context = cls._resolve_context(app_config, theme=theme, runtime=runtime)
         blocks = cls.build_blocks(app_config=context.app_config, theme=context.theme_key, runtime=runtime)
-        return gr.mount_gradio_app(
-            app,
-            blocks,
-            path=path,
-            theme=context.gradio_theme,
-            css=context.extra_css,
-        )
+        mount_kwargs = {"path": path}
+        if cls._mount_supports_theme_css():
+            mount_kwargs["theme"] = context.gradio_theme
+            mount_kwargs["css"] = context.extra_css
+        else:
+            logger.warning(
+                "Current gradio.mount_gradio_app does not support theme/css kwargs; "
+                "mounting without them for compatibility."
+            )
+        return gr.mount_gradio_app(app, blocks, **mount_kwargs)
 
 
 def build_gradio_chat_blocks(
