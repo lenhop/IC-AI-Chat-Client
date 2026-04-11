@@ -122,6 +122,13 @@ class LlmServiceStreamApiTests(unittest.TestCase):
         self.assertIn("text/event-stream", resp.headers.get("content-type", ""))
         self.assertIn('data: {"error": "Internal error while streaming."}', resp.text)
 
+    @patch("app.llm_service.main.validate_llm_worker_env", return_value=None)
+    def test_message_ingress_endpoint_removed(self, _mock_validate: MagicMock) -> None:
+        """v3.5 LLM envelope ingress was removed in favor of /v1/chat/stream."""
+        with TestClient(app) as client:
+            resp = client.post("/v1/messages/test", json={})
+        self.assertEqual(resp.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

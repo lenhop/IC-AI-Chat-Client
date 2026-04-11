@@ -72,13 +72,17 @@ LLM_TRANSPORT=http
 LLM_SERVICE_URL=http://127.0.0.1:8001
 ```
 
-**微服务进程**（仅加载 LLM 相关环境变量，不连 Redis）：
+`scripts/start_uvicorn.sh`（推荐）已内置双进程顺序：先拉起 LLM 微服务（默认 `:8001`），确认端口就绪后再启动 UI（默认 `:8000`）。
+
+手动分开启动时：
+
+- **微服务进程**（仅加载 LLM 相关环境变量，不连 Redis）：
 
 ```bash
 python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 ```
 
-**UI 进程**（`app.main`）：`.env` 中设 `LLM_TRANSPORT=http` 与 `LLM_SERVICE_URL`；启动校验走 `validate_standalone_env` 的 HTTP 分支（不要求本机配置 `DEEPSEEK_API_KEY` / Ollama 变量）。微服务进程仍需通过 `validate_llm_worker_env`（与原先 `LLM_BACKEND` 规则一致）。
+- **UI 进程**（`app.main`）：`.env` 中设 `LLM_TRANSPORT=http` 与 `LLM_SERVICE_URL`；启动校验走 `validate_standalone_env` 的 HTTP 分支（不要求本机配置 `DEEPSEEK_API_KEY` / Ollama 变量）。微服务进程仍需通过 `validate_llm_worker_env`（与原先 `LLM_BACKEND` 规则一致）。
 
 流式冒烟（需微服务已启动）：
 
@@ -90,7 +94,72 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 - 误区：支持 `http` 等于默认拆分。
 - 正确：验收按 `http`，`local` 只做开发回退。
 
-### 2.3 Gradio 界面主题
+### 2.3 v3.5 消息接入口与转发模式
+
+统一消息协议字段：`message_id/session_id/turn_id/type/content/source/target/timestamp/metadata`。
+
+| 变量 | 说明 |
+|------|------|
+| `CHAT_UI_INGRESS_PATH` | UI FastAPI 测试入口，默认 `/v1/messages/test`。 |
+| `CHAT_UI_FORWARD_URL` | UI 下游转发地址。统一指向 LLM 流式接口（默认 `http://127.0.0.1:8001/v1/chat/stream`）。 |
+| `CHAT_UI_FORWARD_TIMEOUT_SECONDS` | UI 转发超时（秒），默认 `30`。 |
+| `CHAT_UI_FORWARD_API_KEY` | 可选，UI 转发时附加 `Authorization: Bearer ...`。 |
+
+行为与兼容策略：
+
+- 统一入口：`POST /v1/messages/test`（可通过 `CHAT_UI_INGRESS_PATH` 覆盖）。
+- 兼容别名：保留 `POST /v1/messages/in` 与 `POST /v1/messages/receive`，用于历史调用兼容；新接入请使用 `/v1/messages/test`。
+- `type=query`：先落库，再按 `CHAT_UI_FORWARD_URL` 转发到下游（默认指向 `/v1/chat/stream`）。
+- `type!=query`：仅落库/展示，不触发下游转发。
+- 与 LLM 关系：`/v1/chat/stream` 仍是唯一 LLM 对话入口；`/v1/messages/test` 是 UI 侧测试接入层。
+
+最小 ingress 请求示例（UI）：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/messages/test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message_id":"m-1",
+    "session_id":"s-1",
+    "turn_id":"t-1",
+    "type":"query",
+    "content":"你好",
+    "source":"chat_ui",
+    "target":"chat_llm",
+    "timestamp":"2026-01-01T00:00:00+00:00",
+    "metadata":{"scene":"direct"}
+  }'
+```
+
+non-query 示例（不会转发，只落库/展示）：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/messages/test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message_id":"m-2",
+    "session_id":"s-1",
+    "turn_id":"t-1",
+    "type":"plan",
+    "content":"先做检索，再回答",
+    "source":"chat_ui",
+    "target":"chat_llm",
+    "timestamp":"2026-01-01T00:00:10+00:00",
+    "metadata":{"scene":"non_query_demo"}
+  }'
+```
+
+最小自动化复验（验收不通过项修复后）：
+
+```bash
+# 自定义测试入口可达性（H1）
+CHAT_UI_INGRESS_PATH=/v1/messages/custom python -m unittest tests.test_ui_ingress_api -v
+
+# ingress -> 存储 -> UI可读取证据链（H2）
+python -m unittest tests.test_ui_ingress_visibility -v
+```
+
+### 2.4 Gradio 界面主题
 
 | 变量 | 说明 |
 |------|------|
@@ -100,11 +169,11 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 
 代码中推荐用 `mount_gradio_chat_app(..., theme="warm")` 覆盖环境变量。`build_gradio_chat_blocks(...)` 为低层构建接口，仅在你需要自行控制挂载细节时使用。
 
-### 2.4 服务监听
+### 2.5 服务监听
 
 `UVICORN_HOST`、`UVICORN_PORT` 可由 `scripts/start_uvicorn.sh` 读取；直接用 `uvicorn` 命令时也可在命令行指定 `--host` / `--port`。
 
-### 2.5 Redis 与会话
+### 2.6 Redis 与会话
 
 - **开关**：默认 `REDIS_ENABLED=false`（不连 Redis）；启用时必须配置可用 `REDIS_URL`，启动会 `ping` 校验，失败直接退出。
 - **关键参数**：`REDIS_KEY_PREFIX`（默认 `icai:`）、`REDIS_SESSION_TTL_SECONDS`（默认 30 天）、`MEMORY_ROUNDS`（默认 3，`0` 表示不截断历史）。
@@ -157,25 +226,47 @@ python -m app.memory.redis_manage_ops --session-id <session_id> --clear -n 3 --t
 
 **前提**：在仓库根目录（或 `PYTHONPATH` 含该根目录）执行，且根目录已有合法 `.env`。
 
-启动或重启服务（推荐）：
+启动或重启服务（推荐，一键双进程）：
 
 ```bash
 ./scripts/start_uvicorn.sh
 ```
 
+`start_uvicorn.sh` 启动顺序（固定）：
+
+1. 释放 `LLM_SERVICE_PORT`（默认 `8001`）占用并启动 `app.llm_service.main:app`（后台）。
+2. 等待 LLM 端口进入 LISTEN。
+3. 释放 `UVICORN_PORT`（默认 `8000`）占用并启动 `app.main:app`（前台）。
+
 可选环境变量：
 
 - `UVICORN_HOST`（默认 `0.0.0.0`）
 - `UVICORN_PORT`（默认 `8000`）
+- `START_LLM_SERVICE`（默认 `1`；设为 `0` 可跳过自动拉起 LLM）
+- `LLM_SERVICE_HOST`（默认 `0.0.0.0`）
+- `LLM_SERVICE_PORT`（默认 `8001`）
+- `LLM_SERVICE_STARTUP_WAIT_SECONDS`（默认 `20`）
+- `LLM_SERVICE_LOG_FILE`（默认 `/tmp/icai-llm-service.log`）
 - `START_UVICORN_RELEASE_TIMEOUT_SECONDS`（默认 `20`）
 
 风险提示：
 
 - `start_uvicorn.sh` 会尝试结束目标端口上的任意 LISTEN 进程（先 `SIGTERM`，必要时 `SIGKILL`），请仅在本地开发环境使用并确认端口用途。
+- 当 `LLM_SERVICE_PORT` 已被其它应用占用时，脚本会优先释放该端口再拉起本项目 LLM 服务，避免 UI 调到错误服务导致 `/v1/chat/stream` 返回 `404`。
 
 直接使用 uvicorn 命令（备选）：
 
 ```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+若你选择手动分开启动，推荐顺序：
+
+```bash
+# 1) 先起 LLM 微服务
+python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
+
+# 2) 再起 UI
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -201,6 +292,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - **换皮肤**：`.env` 中设置 `GRADIO_UI_THEME=warm` 或 `minimal` 后重启。
 
 若 **`Address already in use`**：换端口（如 `8001`）或使用 `./scripts/start_uvicorn.sh` 自动释放端口后重启。
+若 `curl http://127.0.0.1:8001/v1/chat/stream` 返回 `404`：先执行 `curl http://127.0.0.1:8001/openapi.json`，确认标题应为 `IC-AI LLM Service`（不是其它应用）。
 
 ---
 
@@ -345,7 +437,7 @@ if __name__ == "__main__":
   ```
   开发阶段仍推荐 `uvicorn app.main:app --reload`。Worker 数与超时需按 LLM 流式耗时调整。
 - **健康检查**：可对外暴露 FastAPI 自带 `GET /docs` 或自建 `/health`（按需添加路由）。
-- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（含 `test_llm_transport`、`test_turn_lifecycle`、`test_main_routes`、`test_session_store` 等；fakeredis，无 live LLM）。
+- **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（含 `test_llm_transport`、`test_turn_lifecycle`、`test_main_routes`、`test_session_store`、`test_message_ingress`、`test_ui_ingress_api`、`test_config_v35` 等；fakeredis，无 live LLM）。
 
 ---
 
@@ -358,9 +450,11 @@ app/
   deps.py              # require_session_store（M3）
   integrations.py      # 对外 LLM 稳定导出
   runtime_config.py    # RuntimeConfig（库集成）
+  messages/
+    message_envelope.py  # v3.5：统一消息协议（message envelope）
   memory/              # redis_pool、session_store、redis_runtime（Gradio 绑定 Redis）
   llm_service/
-    main.py            # LLM Worker：POST /v1/chat/stream（SSE，默认拆分口径）
+    main.py            # LLM Worker：POST /v1/chat/stream（SSE，唯一对话入口）
   ui/
     gradio_chat.py     # Facade：统一构建与挂载 Gradio UI
     gradio_layout.py   # 页面结构与组件装配
@@ -369,7 +463,9 @@ app/
     gradio_session_turn.py  # Starlette 会话中的活跃 turn_id
     gradio_themes.py   # business / warm / minimal 主题
     message_model.py   # Gradio 按 type 格式化会话消息
-  routes/              # chat_pages（根路径重定向到 /gradio）
+  routes/
+    chat_pages.py      # 根路径重定向到 /gradio
+    message_ingress.py # v3.5：UI 测试接入口（/v1/messages/test，保留旧路径别名）
   services/
     call_llm.py        # 本地 LLM 能力（stream_chat / stream_chat_chunks）
     llm_transport.py   # UI/SSE 统一接口（校验、local/http流式、stage消息回调）
@@ -377,15 +473,20 @@ app/
     call_ollama.py     # Ollama 客户端
     llm_chunks.py      # ChatStreamChunk（M2）
     llm_models.py      # list_chat_model_names（M2）
+    message_ingress.py # v3.5：UI ingress 处理、转发与落库
     chat_prompt.md     # CHAT_MODE=prompt_template：{historical_message}、{current_query}
     prompt_render.py   # 读模板、按轮拼 Markdown 历史
 scripts/
-  start_uvicorn.sh     # 开发启动（自动释放端口后 exec uvicorn）
+  start_uvicorn.sh     # 开发启动（先LLM后UI，自动释放端口并启动）
 tests/                 # unittest（含 Gradio 落库、llm_service 路由级流式、依赖边界等）
   test_smoke_llm_http_stream.py     # LLM HTTP SSE 冒烟（默认门控，不在 discover 中自动 live 调用）
   test_gradio_stage_persist.py     # P0：stage消息实时写Redis与同turn_id
   test_main_routes.py              # P0：主入口与下线路由行为验证
   test_llm_service_stream_api.py   # P1：/v1/chat/stream 真实端点SSE测试
   test_gradio_chat_dependencies.py # P2：UI不直接依赖call_llm细节
+  test_message_ingress.py          # P1：v3.5 ingress 规则（query 转发 / 非 query 不转发）
+  test_ui_ingress_api.py           # P1：UI ingress 路由级行为（含自定义转发目标）
+  test_ui_ingress_visibility.py    # P1：ingress 落库后可被 Gradio history 读取（可见性证据链）
+  test_config_v35.py               # P1：v3.5 配置与启动期校验
 tasks/                 # 设计文档、里程碑、参考图（含 m3_plan_v3.2*.md）
 ```

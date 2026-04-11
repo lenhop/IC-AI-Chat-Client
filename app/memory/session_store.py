@@ -85,8 +85,10 @@ def _canonical_json_blob(
     timestamp: str,
     message_type: str,
     content: str,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Serialize one canonical message for Redis RPUSH."""
+    safe_metadata = metadata if isinstance(metadata, dict) else {}
     return json.dumps(
         {
             "user_id": user_id,
@@ -95,6 +97,7 @@ def _canonical_json_blob(
             "timestamp": timestamp,
             "type": message_type,
             "content": content,
+            "metadata": safe_metadata,
         },
         ensure_ascii=False,
     )
@@ -147,6 +150,7 @@ def normalize_stored_message(
         "content": str(obj.get("content") or ""),
         "timestamp": ts,
         "turn_id": str(obj.get("turn_id") or "").strip(),
+        "metadata": obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {},
     }
 
 
@@ -190,6 +194,48 @@ class SessionStore:
         pipe.execute()
         self._touch_ttl(session_id)
         return session_id
+
+    def ensure_session_exists(self, session_id: str, user_id: str, provider: str) -> None:
+        """
+        Ensure a known session id has meta keys for ingress writes.
+
+        Args:
+            session_id: Session id carried by external envelope.
+            user_id: Owner id used for access check.
+            provider: Backend/provider label for meta.
+
+        Raises:
+            ValueError: If ``session_id`` is blank.
+            SessionAccessDeniedError: Existing session belongs to another user.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id must be non-empty")
+        meta_k = session_meta_key(self._prefix, sid)
+        owner = self._r.hget(meta_k, "user_id")
+        if owner is not None:
+            if str(owner) != str(user_id):
+                raise SessionAccessDeniedError(sid)
+            self._touch_ttl(sid)
+            return
+
+        now = int(time.time())
+        msg_k = session_messages_key(self._prefix, sid)
+        ev_k = session_events_key(self._prefix, sid)
+        pipe = self._r.pipeline(transaction=True)
+        pipe.hset(
+            meta_k,
+            mapping={
+                "user_id": user_id,
+                "created_at": str(now),
+                "last_active": str(now),
+                "provider": provider,
+            },
+        )
+        pipe.delete(msg_k)
+        pipe.delete(ev_k)
+        pipe.execute()
+        self._touch_ttl(sid)
 
     def get_messages(self, session_id: str, user_id: str) -> List[Dict[str, Any]]:
         """
@@ -286,6 +332,7 @@ class SessionStore:
                 timestamp=ts,
                 message_type="query",
                 content=user_content,
+                metadata={},
             ),
             _canonical_json_blob(
                 user_id=user_id,
@@ -294,6 +341,7 @@ class SessionStore:
                 timestamp=ts,
                 message_type="answer",
                 content=assistant_content,
+                metadata={},
             ),
         ]
         self._rpush_canonical_blobs(session_id, user_id, blobs)
@@ -307,6 +355,7 @@ class SessionStore:
         content: str,
         turn_id: str = "",
         timestamp: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Append a single canonical message (any ``type``).
@@ -318,6 +367,7 @@ class SessionStore:
             content: Message body.
             turn_id: Optional shared turn UUID; empty string if none.
             timestamp: ISO UTC string; defaults to now when missing or blank.
+            metadata: Optional structured metadata used by UI message templates.
 
         Raises:
             ValueError: If ``message_type`` is blank.
@@ -340,6 +390,7 @@ class SessionStore:
             timestamp=ts,
             message_type=mt,
             content=content,
+            metadata=metadata,
         )
         self._rpush_canonical_blobs(session_id, user_id, [blob])
 
@@ -418,5 +469,9 @@ def gradio_history_from_stored(
             continue
         row = GradioMessageFormatter.to_chat_row(m)
         if row is not None:
+            # Add a blank placeholder line to previous same-role row so adjacent
+            # cards are visually separated while preserving next heading parsing.
+            if rows and rows[-1].get("role") == row.get("role"):
+                rows[-1] = {**rows[-1], "content": f"{rows[-1].get('content', '')}\n\n&nbsp;\n"}
             rows.append(row)
     return rows

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import urlparse
 from typing import List
 
 
@@ -57,6 +58,11 @@ class AppConfig:
     llm_service_url: str = ""
     llm_service_timeout_seconds: int = 120
     llm_service_api_key: str = ""
+    # v3.5 message ingress/forward settings (UI side).
+    chat_ui_ingress_path: str = "/v1/messages/test"
+    chat_ui_forward_url: str = "http://127.0.0.1:8001/v1/chat/stream"
+    chat_ui_forward_timeout_seconds: int = 30
+    chat_ui_forward_api_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -198,6 +204,12 @@ def get_config() -> AppConfig:
         llm_service_url=(os.getenv("LLM_SERVICE_URL") or "").strip().rstrip("/"),
         llm_service_timeout_seconds=_read_positive_int("LLM_SERVICE_TIMEOUT_SECONDS", 120),
         llm_service_api_key=(os.getenv("LLM_SERVICE_API_KEY") or "").strip(),
+        chat_ui_ingress_path=(os.getenv("CHAT_UI_INGRESS_PATH") or "/v1/messages/test").strip(),
+        chat_ui_forward_url=(
+            os.getenv("CHAT_UI_FORWARD_URL") or "http://127.0.0.1:8001/v1/chat/stream"
+        ).strip().rstrip("/"),
+        chat_ui_forward_timeout_seconds=_read_positive_int("CHAT_UI_FORWARD_TIMEOUT_SECONDS", 30),
+        chat_ui_forward_api_key=(os.getenv("CHAT_UI_FORWARD_API_KEY") or "").strip(),
     )
 
 
@@ -265,6 +277,7 @@ def validate_standalone_env() -> None:
         _validate_redis_env()
         _validate_chat_mode_env()
         _validate_gradio_ui_theme_env()
+        _validate_chat_message_ingress_env()
         return
 
     validate_llm_worker_env()
@@ -272,6 +285,7 @@ def validate_standalone_env() -> None:
     _validate_redis_env()
     _validate_chat_mode_env()
     _validate_gradio_ui_theme_env()
+    _validate_chat_message_ingress_env()
 
 
 def _validate_redis_env() -> None:
@@ -307,6 +321,65 @@ def _validate_gradio_ui_theme_env() -> None:
         )
 
 
+def _validate_path_env(name: str, default_value: str) -> None:
+    """Validate ingress path-like env; must start with ``/``."""
+    raw = (os.getenv(name) or default_value).strip()
+    if not raw.startswith("/"):
+        raise RuntimeError(f"{name} must start with '/', got {raw!r}")
+
+
+def _is_valid_http_url(url: str) -> bool:
+    """Return whether a URL uses http/https and has a non-empty netloc."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return bool(parsed.netloc.strip())
+
+
+def _validate_http_url_env(name: str, default_value: str, *, allow_empty: bool = False) -> None:
+    """
+    Validate URL-like env values with explicit diagnostics.
+
+    Rules:
+    - when ``allow_empty=False``: value must be non-empty and valid http/https URL.
+    - when ``allow_empty=True``: empty is allowed; non-empty value must still be valid.
+    """
+    raw = (os.getenv(name) or default_value).strip()
+    if not raw:
+        if allow_empty:
+            return
+        raise RuntimeError(f"{name} must be non-empty.")
+    if not _is_valid_http_url(raw):
+        raise RuntimeError(
+            f"{name} must be a valid http/https URL with host "
+            f"(got {raw!r})"
+        )
+
+
+def _validate_chat_message_ingress_env() -> None:
+    """Validate v3.5 UI ingress and forwarding env values."""
+    _validate_path_env("CHAT_UI_INGRESS_PATH", "/v1/messages/test")
+
+    timeout_missing: List[str] = []
+    _optional_positive_int("CHAT_UI_FORWARD_TIMEOUT_SECONDS", timeout_missing)
+    if timeout_missing:
+        raise RuntimeError("; ".join(timeout_missing))
+
+    _validate_http_url_env(
+        "CHAT_UI_FORWARD_URL",
+        "http://127.0.0.1:8001/v1/chat/stream",
+        allow_empty=False
+    )
+
+
+def validate_message_ingress_env() -> None:
+    """Public wrapper for v3.5 ingress/forward env validation."""
+    _validate_chat_message_ingress_env()
+
+
 def get_gradio_ui_theme() -> str:
     """
     Gradio client skin from env (default ``business``).
@@ -339,26 +412,37 @@ def validate_app_config_for_ui(cfg: AppConfig) -> None:
             raise ValueError("AppConfig: llm_service_url is required when llm_transport is http")
         if cfg.llm_service_timeout_seconds <= 0:
             raise ValueError("AppConfig: llm_service_timeout_seconds must be positive")
-        return
-
-    backend = (cfg.llm_backend or "").strip().lower()
-    if backend not in {"deepseek", "ollama"}:
-        raise ValueError(f"AppConfig.llm_backend must be deepseek or ollama, got {cfg.llm_backend!r}")
-
-    if backend == "deepseek":
-        if not (cfg.deepseek_api_key or "").strip():
-            raise ValueError("AppConfig: deepseek_api_key is required when llm_backend is deepseek")
-        if cfg.deepseek_request_timeout <= 0:
-            raise ValueError("AppConfig: deepseek_request_timeout must be positive")
+    elif lt != "local":
+        raise ValueError("AppConfig: llm_transport must be local or http")
     else:
-        if not (cfg.ollama_base_url or "").strip():
-            raise ValueError("AppConfig: ollama_base_url is required when llm_backend is ollama")
-        if not (cfg.ollama_generate_model or "").strip():
-            raise ValueError("AppConfig: ollama_generate_model is required when llm_backend is ollama")
-        if not (cfg.ollama_embed_model or "").strip():
-            raise ValueError("AppConfig: ollama_embed_model is required when llm_backend is ollama")
-        if cfg.ollama_request_timeout <= 0:
-            raise ValueError("AppConfig: ollama_request_timeout must be positive")
+        backend = (cfg.llm_backend or "").strip().lower()
+        if backend not in {"deepseek", "ollama"}:
+            raise ValueError(f"AppConfig.llm_backend must be deepseek or ollama, got {cfg.llm_backend!r}")
+
+        if backend == "deepseek":
+            if not (cfg.deepseek_api_key or "").strip():
+                raise ValueError("AppConfig: deepseek_api_key is required when llm_backend is deepseek")
+            if cfg.deepseek_request_timeout <= 0:
+                raise ValueError("AppConfig: deepseek_request_timeout must be positive")
+        else:
+            if not (cfg.ollama_base_url or "").strip():
+                raise ValueError("AppConfig: ollama_base_url is required when llm_backend is ollama")
+            if not (cfg.ollama_generate_model or "").strip():
+                raise ValueError("AppConfig: ollama_generate_model is required when llm_backend is ollama")
+            if not (cfg.ollama_embed_model or "").strip():
+                raise ValueError("AppConfig: ollama_embed_model is required when llm_backend is ollama")
+            if cfg.ollama_request_timeout <= 0:
+                raise ValueError("AppConfig: ollama_request_timeout must be positive")
+
+    if not (cfg.chat_ui_ingress_path or "").startswith("/"):
+        raise ValueError("AppConfig: chat_ui_ingress_path must start with '/'")
+    ui_forward_url = (cfg.chat_ui_forward_url or "").strip()
+    if not ui_forward_url:
+        raise ValueError("AppConfig: chat_ui_forward_url must be non-empty")
+    if not _is_valid_http_url(ui_forward_url):
+        raise ValueError("AppConfig: chat_ui_forward_url must be a valid http/https URL")
+    if cfg.chat_ui_forward_timeout_seconds <= 0:
+        raise ValueError("AppConfig: chat_ui_forward_timeout_seconds must be positive")
 
 
 def _optional_positive_int(name: str, missing: List[str]) -> None:

@@ -109,11 +109,13 @@ class SessionStoreTests(unittest.TestCase):
             "u1",
             message_type="plan",
             content="do things",
+            metadata={"clarification_backend": "deepseek"},
         )
         msgs = self._store.get_messages(sid, "u1")
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0]["type"], "plan")
         self.assertEqual(msgs[0]["content"], "do things")
+        self.assertEqual(msgs[0]["metadata"]["clarification_backend"], "deepseek")
 
     def test_gradio_history_honors_display_off(self) -> None:
         msgs = [
@@ -158,6 +160,34 @@ class SessionStoreTests(unittest.TestCase):
         combined = " ".join(str(r.get("content", "")) for r in rows)
         self.assertNotIn("hidden", combined)
 
+    def test_gradio_history_adds_blank_line_between_same_role_rows(self) -> None:
+        msgs = [
+            {
+                "user_id": "u",
+                "session_id": "s",
+                "type": "answer",
+                "content": "first answer",
+                "timestamp": "t1",
+                "turn_id": "ta",
+                "metadata": {},
+            },
+            {
+                "user_id": "u",
+                "session_id": "s",
+                "type": "clarification",
+                "content": "follow-up clarification",
+                "timestamp": "t2",
+                "turn_id": "ta",
+                "metadata": {},
+            },
+        ]
+        rows = gradio_history_from_stored(msgs, MessageDisplayOptions.all_enabled())
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["role"], "assistant")
+        self.assertEqual(rows[1]["role"], "assistant")
+        self.assertTrue(rows[0]["content"].endswith("\n\n&nbsp;\n"))
+        self.assertTrue(rows[1]["content"].startswith("## Clarification"))
+
     def test_wrong_user_denied(self) -> None:
         sid = self._store.create_session("owner", "deepseek")
         with self.assertRaises(SessionAccessDeniedError):
@@ -172,6 +202,21 @@ class SessionStoreTests(unittest.TestCase):
         self._store.append_turn(sid, "u1", "a", "b")
         self._store.clear_messages(sid, "u1")
         self.assertEqual(self._store.get_messages(sid, "u1"), [])
+
+    def test_ensure_session_exists_allows_external_session_id(self) -> None:
+        """Ingress flow may carry caller-generated session_id and still persist."""
+        sid = "s-fixed-id"
+        self._store.ensure_session_exists(sid, "u1", "deepseek")
+        self._store.append_memory_message(
+            sid,
+            "u1",
+            message_type="query",
+            content="hello",
+            turn_id="t1",
+        )
+        rows = self._store.get_messages(sid, "u1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["type"], "query")
 
 
 if __name__ == "__main__":

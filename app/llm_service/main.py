@@ -1,8 +1,8 @@
 """
 FastAPI app exposing ``POST /v1/chat/stream`` for the UI process when ``LLM_TRANSPORT=http``.
 
-Loads repository-root ``.env`` when present; validates only LLM backend credentials
-(see :func:`app.config.validate_llm_worker_env`). Does not connect to Redis.
+Loads repository-root ``.env`` when present; validates LLM backend credentials
+for standalone worker runtime. Does not connect to Redis.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ _ENV_FILE = PROJECT_ROOT / ".env"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Load dotenv then enforce LLM worker env before serving."""
+    """Load dotenv then enforce LLM worker env validity before serving."""
     if _ENV_FILE.is_file():
         load_dotenv(_ENV_FILE, override=False)
     try:
@@ -46,7 +46,6 @@ app = FastAPI(
     description="Streams chat completions for IC-AI-Chat-Client UI over SSE.",
     lifespan=lifespan,
 )
-
 
 class _MessageItem(BaseModel):
     role: Literal["system", "user", "assistant"]
@@ -118,3 +117,5 @@ async def chat_stream_v1(body: _StreamRequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+

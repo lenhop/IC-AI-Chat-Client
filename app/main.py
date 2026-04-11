@@ -20,10 +20,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.config import get_redis_settings, validate_standalone_env
+from app.config import get_config, get_redis_settings, validate_standalone_env
 from app.memory.redis_pool import close_redis_client, create_sync_redis_client
 from app.memory.redis_runtime import bind_redis_for_gradio, clear_redis_for_gradio
 from app.routes.chat_pages import router as chat_pages_router
+from app.routes.message_ingress import (
+    MessageIngressRouteFacade,
+    message_ingress_v1,
+    router as message_ingress_router,
+)
+from app.services.message_ingress import MessageIngressResult
 from app.ui.gradio_chat import mount_gradio_chat_app
 
 
@@ -102,4 +108,13 @@ if _REDIS_BOOTSTRAP.enabled:
     app.add_middleware(SessionMiddleware, secret_key=_secret)
 
 app.include_router(chat_pages_router)
+app.include_router(message_ingress_router)
+_cfg = get_config()
+for alias_path in MessageIngressRouteFacade.resolve_alias_paths(_cfg.chat_ui_ingress_path):
+    app.add_api_route(
+        alias_path,
+        message_ingress_v1,
+        methods=["POST"],
+        response_model=MessageIngressResult,
+    )
 mount_gradio_chat_app(app, path="/gradio")
