@@ -41,9 +41,9 @@ def _cfg() -> AppConfig:
 class UiIngressApiTests(unittest.TestCase):
     """Verify UI ingress keeps query-only forwarding contract."""
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_non_query_request_not_forwarded(
         self,
         mock_forward: MagicMock,
@@ -69,9 +69,9 @@ class UiIngressApiTests(unittest.TestCase):
         self.assertFalse(resp.json()["forwarded"])
         mock_forward.assert_not_called()
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_query_request_forwarded(
         self,
         mock_forward: MagicMock,
@@ -120,9 +120,9 @@ class UiIngressApiTests(unittest.TestCase):
         self.assertEqual(down_env["metadata"]["reply_to_message_id"], "m-query")
         mock_forward.assert_called_once()
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_query_uses_configured_forward_url(
         self,
         mock_forward: MagicMock,
@@ -159,9 +159,9 @@ class UiIngressApiTests(unittest.TestCase):
             "http://127.0.0.1:8201/v1/messages/test",
         )
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_query_forward_error_maps_to_502(
         self,
         mock_forward: MagicMock,
@@ -188,9 +188,9 @@ class UiIngressApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 502)
         self.assertIn("Failed to forward query message", resp.json()["detail"])
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_legacy_alias_paths_still_available(
         self,
         mock_forward: MagicMock,
@@ -218,9 +218,9 @@ class UiIngressApiTests(unittest.TestCase):
         self.assertEqual(resp_in.status_code, 200)
         self.assertEqual(resp_receive.status_code, 200)
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_custom_env_ingress_path_route_is_reachable(
         self,
         mock_forward: MagicMock,

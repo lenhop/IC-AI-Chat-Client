@@ -5,7 +5,6 @@ from app.memory.session_store import (
     SessionNotFoundError,
     SessionStore,
     gradio_history_from_stored,
-    messages_for_openai_payload,
 )
 
 __all__ = [
@@ -13,5 +12,4 @@ __all__ = [
     "SessionNotFoundError",
     "SessionStore",
     "gradio_history_from_stored",
-    "messages_for_openai_payload",
 ]

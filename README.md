@@ -113,6 +113,38 @@ python -m uvicorn app.llm_service.main:app --host 0.0.0.0 --port 8001
 - `type!=query`：仅落库/展示，不触发下游转发。
 - 与 LLM 关系：`/v1/chat/stream` 仍是唯一 LLM 对话入口；`/v1/messages/test` 是 UI 侧测试接入层。
 
+v3.6 入口模块状态：
+
+- ingress 路由与服务仅保留新路径：`app/messages/message_ingress_route.py`、`app/messages/message_ingress_service.py`。
+- 历史兼容壳 `app/routes/message_ingress.py`、`app/services/message_ingress.py` 已移除。
+
+`CHAT_UI_INGRESS_PATH` 与 `CHAT_UI_FORWARD_URL` 的关系（推荐先看）：
+
+- `CHAT_UI_INGRESS_PATH`：定义“外部消息打到 UI 的入口路径”（例如 `/v1/messages/test`）。
+- `CHAT_UI_FORWARD_URL`：定义“UI 在收到 `type=query` 后转发到哪里”。
+- 两者职责固定：**入口负责接收，转发地址负责下游调用**；不要把两者混用。
+- 推荐默认值：
+  - `CHAT_UI_INGRESS_PATH=/v1/messages/test`
+  - `CHAT_UI_FORWARD_URL=http://127.0.0.1:8001/v1/chat/stream`
+
+`.env` 配置示例（默认推荐）：
+
+```env
+CHAT_UI_INGRESS_PATH=/v1/messages/test
+CHAT_UI_FORWARD_URL=http://127.0.0.1:8001/v1/chat/stream
+CHAT_UI_FORWARD_TIMEOUT_SECONDS=30
+CHAT_UI_FORWARD_API_KEY=
+```
+
+`.env` 配置示例（自定义入口路径）：
+
+```env
+CHAT_UI_INGRESS_PATH=/v1/messages/custom
+CHAT_UI_FORWARD_URL=http://127.0.0.1:8001/v1/chat/stream
+CHAT_UI_FORWARD_TIMEOUT_SECONDS=30
+CHAT_UI_FORWARD_API_KEY=
+```
+
 最小 ingress 请求示例（UI）：
 
 ```bash
@@ -146,6 +178,24 @@ curl -X POST "http://127.0.0.1:8000/v1/messages/test" \
     "target":"chat_llm",
     "timestamp":"2026-01-01T00:00:10+00:00",
     "metadata":{"scene":"non_query_demo"}
+  }'
+```
+
+自定义入口调用示例（当 `CHAT_UI_INGRESS_PATH=/v1/messages/custom`）：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/messages/custom" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message_id":"m-custom-1",
+    "session_id":"s-custom-1",
+    "turn_id":"t-custom-1",
+    "type":"query",
+    "content":"请简要介绍下 RAG",
+    "source":"chat_ui",
+    "target":"chat_llm",
+    "timestamp":"2026-01-01T00:01:00+00:00",
+    "metadata":{"scene":"custom_ingress_demo"}
   }'
 ```
 
@@ -319,6 +369,8 @@ RuntimeConfig · validate_runtime_config · normalize_messages
 stream_chat · stream_chat_chunks · ChatStreamChunk · complete_chat · list_chat_model_names
 ```
 
+#### 6.1.1 方式 A：在 Python 代码中直接调用（推荐）
+
 - **`stream_chat`**：仅拼接助手可见正文（`content_delta`），与 Gradio/SSE 行为一致。  
 - **`stream_chat_chunks`**：结构化块（含可选 `reasoning_delta`、结束标记 `done`）。  
 - **`list_chat_model_names`**：Ollama 使用 `GET /api/tags`；DeepSeek 无列举 API 时返回当前配置的单个模型 id。
@@ -360,6 +412,58 @@ messages = normalize_messages(
 )
 print(complete_chat(messages, runtime=cfg))
 ```
+
+#### 6.1.2 方式 B：在宿主 FastAPI 中调用 chat LLM（SSE 路由示例）
+
+当你在外部项目（如 `ic-rag-agent`）里希望通过一个 FastAPI 路由对外暴露 chat LLM，可直接调用 `app.integrations.stream_chat`，并将增量写成 SSE。
+
+```python
+from __future__ import annotations
+
+import json
+from typing import Generator
+
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+from app.integrations import RuntimeConfig, normalize_messages, stream_chat
+
+app = FastAPI()
+
+
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/v1/chat/stream")
+def chat_stream():
+    runtime = RuntimeConfig(
+        llm_backend="deepseek",
+        deepseek_api_key="sk-你的密钥",
+        deepseek_llm_model="deepseek-chat",
+    )
+    messages = normalize_messages([{"role": "user", "content": "你好，请介绍一下你自己。"}])
+
+    def event_generator() -> Generator[str, None, None]:
+        try:
+            for delta in stream_chat(messages, runtime=runtime):
+                yield _sse({"delta": delta})
+            yield _sse({"done": True})
+        except Exception as exc:  # noqa: BLE001
+            yield _sse({"error": str(exc)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+```
+
+使用建议：
+
+- 路由契约建议保持与本项目一致：`POST /v1/chat/stream` + SSE `delta/done/error`。
+- 如果作为 `chat UI` 下游，确保 `LLM_TRANSPORT=http` 且 `LLM_SERVICE_URL` 指向该服务。
+- 生产环境请把密钥放环境变量或密钥管理系统，不要写死在代码中。
 
 ### 6.2 同款 Gradio UI（推荐）：`mount_gradio_chat_app`
 
@@ -409,6 +513,70 @@ if __name__ == "__main__":
 
 在宿主路由中组装 `messages`，循环 `stream_chat(..., runtime=cfg)`，将每个 `delta` 写成 SSE `data:` 帧即可；密钥勿写进仓库。
 
+### 6.4 Chat UI 对接下游应用（如 ic-rag-agent）
+
+本节给出“仅迁移 Chat UI、下游已有 route/dispatcher/rag 服务”的最小对接教程。
+
+#### 6.4.1 对接目标与数据流
+
+- Gradio 主输入链路：`chat UI -> route llm (/v1/chat/stream)`。
+- 外部消息接入链路：`external/dispatcher -> CHAT_UI_INGRESS_PATH`。
+- ingress 规则：`type=query` 会继续转发到 `CHAT_UI_FORWARD_URL`；非 query 只落库/展示。
+
+#### 6.4.2 下游（route llm）必须提供的接口契约
+
+`POST /v1/chat/stream`，请求体兼容：
+
+```json
+{
+  "messages": [{"role": "user", "content": "hello"}],
+  "backend": "optional",
+  "model": "optional"
+}
+```
+
+返回必须是 SSE 帧：
+
+- `data: {"delta":"..."}`（可多次）
+- `data: {"done": true}`（结束）
+- `data: {"error":"..."}`（异常）
+
+#### 6.4.3 Chat UI 侧 `.env` 最小配置
+
+```env
+# 1) Gradio 主输入走下游 route llm
+LLM_TRANSPORT=http
+LLM_SERVICE_URL=http://<route-llm-host>:<port>
+
+# 2) UI 测试接入口（给 dispatcher / 外部系统投递消息）
+CHAT_UI_INGRESS_PATH=/v1/messages/test
+
+# 3) ingress 收到 query 后转发到下游
+CHAT_UI_FORWARD_URL=http://<route-llm-host>:<port>/v1/chat/stream
+CHAT_UI_FORWARD_TIMEOUT_SECONDS=30
+CHAT_UI_FORWARD_API_KEY=
+```
+
+可选：如果只想启动 UI，不自动拉起本仓库 LLM：
+
+```bash
+START_LLM_SERVICE=0 ./scripts/start_uvicorn.sh
+```
+
+#### 6.4.4 联调步骤（推荐顺序）
+
+1. 先测下游 route llm 的 `/v1/chat/stream`（确认 SSE 正常）。
+2. 启动 Chat UI，打开 `/gradio` 用输入框直测一条 query。
+3. 再测 UI ingress：
+   - `POST /v1/messages/test` 发送 `type=query`，应返回 `forwarded=true`；
+   - `type=clarification/plan/...`，应返回 `forwarded=false` 且可在会话历史展示。
+
+#### 6.4.5 常见坑位
+
+- **会话不一致看不到消息**：外部投递到 ingress 的 `session_id` 必须和当前页面会话一致。
+- **只启了 UI 没启下游**：会出现 `Connection refused`，先确认 `LLM_SERVICE_URL` 可达。
+- **误把 ingress 当主输入链路**：用户在 Gradio 输入框默认走 `LLM_SERVICE_URL + /v1/chat/stream`，不是走 `CHAT_UI_INGRESS_PATH`。
+
 ---
 
 ## 7. 常见问题
@@ -445,48 +613,40 @@ if __name__ == "__main__":
 
 ```text
 app/
-  main.py              # FastAPI 入口、lifespan Redis、SessionMiddleware（M3）、挂载 Gradio
-  config.py            # AppConfig、RedisSettings、validate_standalone_env、get_gradio_ui_theme
-  deps.py              # require_session_store（M3）
-  integrations.py      # 对外 LLM 稳定导出
-  runtime_config.py    # RuntimeConfig（库集成）
+  main.py                # FastAPI 入口、lifespan Redis、SessionMiddleware（M3）、挂载 Gradio
+  config.py              # AppConfig、RedisSettings、validate_standalone_env、get_gradio_ui_theme
+  integrations.py        # 对外 LLM 稳定导出（stream_chat/RuntimeConfig/list_chat_model_names）
+  runtime_config.py      # RuntimeConfig（库集成）
   messages/
-    message_envelope.py  # v3.5：统一消息协议（message envelope）
-  memory/              # redis_pool、session_store、redis_runtime（Gradio 绑定 Redis）
+    message_envelope.py         # 统一消息协议（message envelope）
+    message_ingress_route.py    # v3.6：UI 测试接入口（/v1/messages/test，保留旧路径别名）
+    message_ingress_service.py  # v3.6：UI ingress 处理、转发与落库
+  memory/
+    redis_pool.py             # Redis 连接池
+    session_store.py          # 会话读写、消息追加、历史读取
+    redis_runtime.py          # 运行时缓存/注入 helpers
+    redis_manage_ops.py       # 本地运维脚本入口（会话查询/清理）
   llm_service/
-    main.py            # LLM Worker：POST /v1/chat/stream（SSE，唯一对话入口）
+    main.py                  # LLM Worker：POST /v1/chat/stream（SSE，唯一对话入口）
   ui/
-    gradio_chat.py     # Facade：统一构建与挂载 Gradio UI
-    gradio_layout.py   # 页面结构与组件装配
-    gradio_handlers.py # 输入/流式回调/异常处理
-    gradio_persistence.py # session 与 Redis 持久化
-    gradio_session_turn.py  # Starlette 会话中的活跃 turn_id
-    gradio_themes.py   # business / warm / minimal 主题
-    message_model.py   # Gradio 按 type 格式化会话消息
+    gradio_chat.py           # Facade：统一构建与挂载 Gradio UI
+    gradio_layout.py         # 页面结构与组件装配
+    gradio_handlers.py       # 输入/流式回调/异常处理
+    gradio_persistence.py    # session 与 Redis 持久化
+    gradio_session_turn.py   # Starlette 会话中的活跃 turn_id
+    gradio_themes.py         # business / warm / minimal 主题
+    message_model.py         # Gradio 按 type 格式化会话消息
   routes/
-    chat_pages.py      # 根路径重定向到 /gradio
-    message_ingress.py # v3.5：UI 测试接入口（/v1/messages/test，保留旧路径别名）
+    chat_pages.py            # 根路径重定向到 /gradio
   services/
-    call_llm.py        # 本地 LLM 能力（stream_chat / stream_chat_chunks）
-    llm_transport.py   # UI/SSE 统一接口（校验、local/http流式、stage消息回调）
-    call_deepseek.py   # DeepSeek 客户端
-    call_ollama.py     # Ollama 客户端
-    llm_chunks.py      # ChatStreamChunk（M2）
-    llm_models.py      # list_chat_model_names（M2）
-    message_ingress.py # v3.5：UI ingress 处理、转发与落库
-    chat_prompt.md     # CHAT_MODE=prompt_template：{historical_message}、{current_query}
-    prompt_render.py   # 读模板、按轮拼 Markdown 历史
+    call_llm.py              # 本地 LLM 能力（stream_chat / stream_chat_chunks）
+    llm_transport.py         # UI/SSE 统一接口（校验、local/http流式、stage消息回调）
+    call_deepseek.py         # DeepSeek 客户端
+    call_ollama.py           # Ollama 客户端
+    llm_chunks.py            # ChatStreamChunk
+    llm_models.py            # list_chat_model_names
+    chat_prompt.md           # CHAT_MODE=prompt_template：{historical_message}、{current_query}
+    prompt_render.py         # 读模板、按轮拼 Markdown 历史
 scripts/
-  start_uvicorn.sh     # 开发启动（先LLM后UI，自动释放端口并启动）
-tests/                 # unittest（含 Gradio 落库、llm_service 路由级流式、依赖边界等）
-  test_smoke_llm_http_stream.py     # LLM HTTP SSE 冒烟（默认门控，不在 discover 中自动 live 调用）
-  test_gradio_stage_persist.py     # P0：stage消息实时写Redis与同turn_id
-  test_main_routes.py              # P0：主入口与下线路由行为验证
-  test_llm_service_stream_api.py   # P1：/v1/chat/stream 真实端点SSE测试
-  test_gradio_chat_dependencies.py # P2：UI不直接依赖call_llm细节
-  test_message_ingress.py          # P1：v3.5 ingress 规则（query 转发 / 非 query 不转发）
-  test_ui_ingress_api.py           # P1：UI ingress 路由级行为（含自定义转发目标）
-  test_ui_ingress_visibility.py    # P1：ingress 落库后可被 Gradio history 读取（可见性证据链）
-  test_config_v35.py               # P1：v3.5 配置与启动期校验
-tasks/                 # 设计文档、里程碑、参考图（含 m3_plan_v3.2*.md）
+  start_uvicorn.sh           # 开发启动（先LLM后UI，自动释放端口并启动）
 ```

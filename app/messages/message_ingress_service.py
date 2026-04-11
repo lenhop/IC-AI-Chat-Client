@@ -35,6 +35,7 @@ class MessageIngressResult(BaseModel):
 
 class MessageIngressService:
     """Facade for UI ingress handling, forwarding, and persistence."""
+
     INVALID_SSE_FRAME_LIMIT = 3
 
     @classmethod
@@ -322,4 +323,3 @@ class MessageIngressService:
             stored=stored,
             downstream=downstream,
         )
-

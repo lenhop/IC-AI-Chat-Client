@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from app.config import AppConfig
 from app.messages.message_envelope import MessageEnvelope
-from app.services.message_ingress import MessageIngressService
+from app.messages.message_ingress_service import MessageIngressService
 
 
 def _base_cfg() -> AppConfig:
@@ -99,9 +99,9 @@ class _MockSseHttpClient:
 class MessageIngressTests(unittest.TestCase):
     """Cover query/non-query branches and downstream forwarding behavior."""
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_ui_non_query_is_not_forwarded(
         self,
         mock_forward: MagicMock,
@@ -117,9 +117,9 @@ class MessageIngressTests(unittest.TestCase):
         self.assertEqual(out.type, "plan")
         mock_forward.assert_not_called()
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_ui_query_is_forwarded(
         self,
         mock_forward: MagicMock,
@@ -159,9 +159,9 @@ class MessageIngressTests(unittest.TestCase):
         self.assertEqual(answer_env["turn_id"], "t-1")
         self.assertEqual(answer_env["metadata"]["reply_to_message_id"], "m-1")
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_ui_uses_configured_forward_target(
         self,
         mock_forward: MagicMock,
@@ -184,9 +184,9 @@ class MessageIngressTests(unittest.TestCase):
         called_kwargs = mock_forward.call_args.kwargs
         self.assertEqual(called_kwargs["url"], "http://127.0.0.1:8201/v1/messages/test")
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_ui_query_forward_failure_raises_runtime_error(
         self,
         mock_forward: MagicMock,
@@ -202,10 +202,10 @@ class MessageIngressTests(unittest.TestCase):
             MessageIngressService.handle_ui_ingress(_envelope("query"))
         self.assertIn("Failed to forward query message", str(ctx.exception))
 
-    @patch("app.services.message_ingress.logger.info")
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._store_envelope")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.logger.info")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._store_envelope")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_non_query_done_log_contains_completion_fields(
         self,
         mock_forward: MagicMock,
@@ -232,8 +232,8 @@ class MessageIngressTests(unittest.TestCase):
         self.assertGreaterEqual(done_call.args[9], 0)
         self.assertTrue(done_call.args[10])
 
-    @patch("app.services.message_ingress.httpx.Client", new=_MockSseHttpClient)
-    @patch("app.services.message_ingress.logger.warning")
+    @patch("app.messages.message_ingress_service.httpx.Client", new=_MockSseHttpClient)
+    @patch("app.messages.message_ingress_service.logger.warning")
     def test_sse_invalid_frame_over_threshold_raises(self, mock_warning: MagicMock) -> None:
         """Too many invalid SSE data frames should fail fast with diagnostics."""
         _MockSseHttpClient.response_lines = [
@@ -252,8 +252,8 @@ class MessageIngressTests(unittest.TestCase):
         self.assertIn("too many invalid JSON frames", str(ctx.exception))
         self.assertGreaterEqual(mock_warning.call_count, 4)
 
-    @patch("app.services.message_ingress.httpx.Client", new=_MockSseHttpClient)
-    @patch("app.services.message_ingress.logger.warning")
+    @patch("app.messages.message_ingress_service.httpx.Client", new=_MockSseHttpClient)
+    @patch("app.messages.message_ingress_service.logger.warning")
     def test_sse_single_invalid_frame_logs_and_recovers(self, mock_warning: MagicMock) -> None:
         """One invalid SSE frame should be logged while valid deltas still pass."""
         envelope = _envelope("query")

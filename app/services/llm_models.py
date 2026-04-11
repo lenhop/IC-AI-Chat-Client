@@ -73,6 +73,10 @@ def list_chat_model_names(
     """
     List model names for the resolved backend (env or explicit ``runtime``).
 
+    Compatibility note:
+        This public function is re-exported by ``app.integrations`` and is kept
+        as the stable external API for model discovery.
+
     Args:
         backend: Optional ``deepseek`` / ``ollama`` label; ignored when ``runtime`` is set.
         runtime: If set, use this backend and config fields only.

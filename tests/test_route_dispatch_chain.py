@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from app.config import AppConfig
 from app.messages.message_envelope import MessageEnvelope
-from app.services.message_ingress import MessageIngressService
+from app.messages.message_ingress_service import MessageIngressService
 
 
 def _scene2_cfg() -> AppConfig:
@@ -121,8 +121,8 @@ class _MockRouteDispatcherClient:
 class RouteDispatchChainTests(unittest.TestCase):
     """Verify scene2 full round-trip and answer persistence contract."""
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.httpx.Client", new=_MockRouteDispatcherClient)
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.httpx.Client", new=_MockRouteDispatcherClient)
     def test_scene2_round_trip_answer_returned_and_persisted(
         self,
         mock_get_cfg,

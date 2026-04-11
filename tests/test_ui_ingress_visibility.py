@@ -11,7 +11,7 @@ from app.config import AppConfig, MessageDisplayOptions, RedisSettings
 from app.memory.redis_runtime import bind_redis_for_gradio, clear_redis_for_gradio
 from app.memory.session_store import SessionStore, gradio_history_from_stored
 from app.messages.message_envelope import MessageEnvelope
-from app.services.message_ingress import MessageIngressService
+from app.messages.message_ingress_service import MessageIngressService
 
 
 def _visibility_cfg() -> AppConfig:
@@ -59,8 +59,8 @@ class UiIngressVisibilityTests(unittest.TestCase):
         """Clean process-local Redis bindings after each test."""
         clear_redis_for_gradio()
 
-    @patch("app.services.message_ingress.get_config")
-    @patch("app.services.message_ingress.MessageIngressService._forward_message")
+    @patch("app.messages.message_ingress_service.get_config")
+    @patch("app.messages.message_ingress_service.MessageIngressService._forward_message")
     def test_ingress_messages_are_visible_in_gradio_history(
         self,
         mock_forward,

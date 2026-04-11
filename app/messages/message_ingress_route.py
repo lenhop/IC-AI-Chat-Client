@@ -8,7 +8,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 
 from app.messages.message_envelope import MessageEnvelope
-from app.services.message_ingress import MessageIngressResult, MessageIngressService
+from app.messages.message_ingress_service import MessageIngressResult, MessageIngressService
 
 logger = logging.getLogger(__name__)
 
@@ -51,4 +51,3 @@ class MessageIngressRouteFacade:
 async def message_ingress_v1(body: MessageEnvelope) -> MessageIngressResult:
     """Canonical v3.5 test ingress endpoint for message envelopes."""
     return await MessageIngressRouteFacade.handle_ingress(body)
-

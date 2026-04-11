@@ -376,7 +376,13 @@ def _validate_chat_message_ingress_env() -> None:
 
 
 def validate_message_ingress_env() -> None:
-    """Public wrapper for v3.5 ingress/forward env validation."""
+    """
+    Public wrapper for v3.5 ingress/forward env validation.
+
+    Compatibility note:
+        Kept as a stable public entrypoint for tests and external scripts that
+        validate only ingress-related env variables.
+    """
     _validate_chat_message_ingress_env()
 
 

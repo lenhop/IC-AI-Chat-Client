@@ -24,12 +24,12 @@ from app.config import get_config, get_redis_settings, validate_standalone_env
 from app.memory.redis_pool import close_redis_client, create_sync_redis_client
 from app.memory.redis_runtime import bind_redis_for_gradio, clear_redis_for_gradio
 from app.routes.chat_pages import router as chat_pages_router
-from app.routes.message_ingress import (
+from app.messages.message_ingress_route import (
     MessageIngressRouteFacade,
     message_ingress_v1,
     router as message_ingress_router,
 )
-from app.services.message_ingress import MessageIngressResult
+from app.messages.message_ingress_service import MessageIngressResult
 from app.ui.gradio_chat import mount_gradio_chat_app
 
 

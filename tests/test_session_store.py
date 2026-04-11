@@ -15,7 +15,6 @@ from app.memory.session_store import (
     SessionNotFoundError,
     SessionStore,
     gradio_history_from_stored,
-    messages_for_openai_payload,
     normalize_stored_message,
 )
 
@@ -27,6 +26,21 @@ def _fake_settings() -> RedisSettings:
         key_prefix="test:",
         session_ttl_seconds=3600,
     )
+
+
+def _to_openai_payload(messages: list[dict]) -> list[dict[str, str]]:
+    """Map canonical session rows to OpenAI role/content for test-only assertions."""
+    rows: list[dict[str, str]] = []
+    for message in messages:
+        message_type = str(message.get("type") or "").strip()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        if message_type == "query":
+            rows.append({"role": "user", "content": content})
+        elif message_type == "answer":
+            rows.append({"role": "assistant", "content": content})
+    return rows
 
 
 class SessionStoreTests(unittest.TestCase):
@@ -64,7 +78,7 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(raw[1].get("type"), "answer")
         self.assertEqual(raw[1].get("content"), "world")
         self.assertEqual(raw[0].get("turn_id"), raw[1].get("turn_id"))
-        openai = messages_for_openai_payload(raw)
+        openai = _to_openai_payload(raw)
         self.assertEqual(len(openai), 2)
         gradio_rows = gradio_history_from_stored(raw)
         self.assertEqual(len(gradio_rows), 2)

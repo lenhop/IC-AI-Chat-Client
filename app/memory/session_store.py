@@ -413,33 +413,6 @@ class SessionStore:
                 logger.warning("redis expire failed for %s: %s", k, exc)
 
 
-def messages_for_openai_payload(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """
-    Map normalized records to OpenAI-style role/content (only query/answer).
-
-    Args:
-        messages: Canonical dicts from ``get_messages``.
-
-    Returns:
-        OpenAI-style message dicts (skips empty content and non query/answer types).
-
-    Example:
-        >>> messages_for_openai_payload([{"type": "query", "content": "hi"}])
-        [{'role': 'user', 'content': 'hi'}]
-    """
-    out: List[Dict[str, str]] = []
-    for m in messages:
-        mtype = (m.get("type") or "").strip()
-        content = (m.get("content") or "").strip()
-        if not content:
-            continue
-        if mtype == "query":
-            out.append({"role": "user", "content": content})
-        elif mtype == "answer":
-            out.append({"role": "assistant", "content": content})
-    return out
-
-
 def gradio_history_from_stored(
     messages: List[Dict[str, Any]],
     display: Optional[MessageDisplayOptions] = None,
