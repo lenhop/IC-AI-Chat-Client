@@ -9,6 +9,7 @@ import gradio as gr
 
 from app.runtime_config import RuntimeConfig
 from app.services.llm_transport import iter_chat_text_deltas, validate_or_normalize_messages
+from app.ui.chat_history_normalize import normalize_chat_history
 from app.ui.gradio_persistence import GradioPersistenceService
 
 logger = logging.getLogger(__name__)
@@ -18,38 +19,9 @@ class GradioHandlerService:
     """User/assistant handler methods for Gradio event pipeline."""
 
     @classmethod
-    def _normalize_chat_row(cls, item: Any) -> Optional[Dict[str, str]]:
-        """
-        Normalize one history item to Gradio ``messages`` format.
-
-        Gradio versions may pass richer objects or malformed rows in callback
-        history. This helper keeps only valid ``{role, content}`` rows and
-        coerces content into string to prevent format compatibility failures.
-        """
-        role: Any = None
-        content: Any = None
-        if isinstance(item, dict):
-            role = item.get("role")
-            content = item.get("content")
-        else:
-            role = getattr(item, "role", None)
-            content = getattr(item, "content", None)
-
-        role_text = str(role or "").strip()
-        if role_text not in {"system", "user", "assistant"}:
-            return None
-        return {"role": role_text, "content": str(content or "")}
-
-    @classmethod
     def clone_message_history(cls, history: Any) -> List[Dict[str, str]]:
         """Normalize and deep-copy chat history rows as mutable dict list."""
-        base = history or []
-        out: List[Dict[str, str]] = []
-        for item in base:
-            row = cls._normalize_chat_row(item)
-            if row is not None:
-                out.append(row)
-        return out
+        return list(normalize_chat_history(history))
 
     @classmethod
     def messages_for_api(cls, history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -120,7 +92,7 @@ class GradioHandlerService:
         try:
             normalized = validate_or_normalize_messages(api_messages)
         except ValueError as exc:
-            history_list[-1]["content"] = f"[错误] {exc}"
+            history_list[-1]["content"] = f"[Error] {exc}"
             yield cls.clone_message_history(history_list)
             return
 
@@ -165,13 +137,13 @@ class GradioHandlerService:
         except (RuntimeError, ValueError) as exc:
             logger.warning("Gradio stream_chat failed: %s", exc)
             history_list[-1]["content"] = (
-                accumulated + f"\n[错误] {exc}" if accumulated else f"[错误] {exc}"
+                accumulated + f"\n[Error] {exc}" if accumulated else f"[Error] {exc}"
             )
             yield cls.clone_message_history(history_list)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Gradio chat unexpected failure")
             history_list[-1]["content"] = (
-                accumulated + f"\n[错误] {exc}" if accumulated else f"[错误] {exc}"
+                accumulated + f"\n[Error] {exc}" if accumulated else f"[Error] {exc}"
             )
             yield cls.clone_message_history(history_list)
 

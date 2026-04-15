@@ -25,9 +25,7 @@ from app.ui.gradio_themes import (
     build_gradio_theme,
     normalize_ui_theme,
     theme_extra_css,
-    theme_header_html,
 )
-
 logger = logging.getLogger(__name__)
 
 
@@ -40,11 +38,27 @@ class GradioChatBuildContext:
     gradio_theme: gr.Theme
     extra_css: str
     page_title: str
-    header_html: str
+    backend_label: str
+    model_label: str
+    user_label: str
 
 
 class GradioChatFacade:
     """Single facade interface for building and mounting Gradio chat."""
+
+    @classmethod
+    def _resolve_backend_label(cls, backend_key: str) -> str:
+        """Return user-facing backend label from internal backend key."""
+        backend_map = {"deepseek": "DeepSeek", "ollama": "Ollama"}
+        normalized_backend = (backend_key or "").strip().lower()
+        return backend_map.get(normalized_backend, backend_key)
+
+    @classmethod
+    def _resolve_model_label(cls, app_config: AppConfig) -> str:
+        """Return currently active model id for sidebar metadata."""
+        if app_config.llm_backend == "deepseek":
+            return app_config.deepseek_llm_model
+        return app_config.ollama_generate_model
 
     @classmethod
     def _mount_supports_theme_css(cls) -> bool:
@@ -88,18 +102,15 @@ class GradioChatFacade:
         theme_key: GradioUiTheme = normalize_ui_theme(
             theme if theme is not None else get_gradio_ui_theme()
         )
-        page_titles = {
-            "business": "IC-AI Chat · 商务",
-            "warm": "IC-AI Chat · 温馨",
-            "minimal": "IC-AI Chat",
-        }
         return GradioChatBuildContext(
             app_config=resolved_cfg,
             theme_key=theme_key,
             gradio_theme=build_gradio_theme(theme_key),
             extra_css=theme_extra_css(theme_key),
-            page_title=page_titles.get(theme_key, "IC-AI Chat"),
-            header_html=theme_header_html(resolved_cfg, theme_key),
+            page_title="IC-AI-Chat Client",
+            backend_label=cls._resolve_backend_label(resolved_cfg.llm_backend),
+            model_label=cls._resolve_model_label(resolved_cfg),
+            user_label=resolved_cfg.user_id,
         )
 
     @classmethod
@@ -158,8 +169,10 @@ class GradioChatFacade:
 
         return GradioLayoutService.build_blocks(
             page_title=context.page_title,
-            header_html=context.header_html,
             theme_key=context.theme_key,
+            backend_label=context.backend_label,
+            model_label=context.model_label,
+            user_label=context.user_label,
             on_load=_page_load,
             on_user_turn=_user_turn,
             on_stream_assistant=_stream_assistant,

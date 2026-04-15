@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import unittest
+import warnings
 from unittest.mock import patch
 
 import fakeredis
@@ -31,6 +34,20 @@ class _InnerRequest:
 class _GradioRequestStub:
     def __init__(self, session: dict) -> None:
         self.request = _InnerRequest(session)
+
+
+def _close_stray_asyncio_event_loops() -> None:
+    """Close event loops left open by third-party code (e.g. Gradio) during tests."""
+    for obj in gc.get_objects():
+        if isinstance(obj, asyncio.AbstractEventLoop) and not obj.is_closed():
+            try:
+                obj.close()
+            except (RuntimeError, OSError):
+                pass
+    try:
+        asyncio.set_event_loop(None)
+    except (RuntimeError, OSError):
+        pass
 
 
 class GradioChatHandlerTests(unittest.TestCase):
@@ -64,7 +81,7 @@ class GradioChatHandlerTests(unittest.TestCase):
         self.assertTrue(str(rows[0].get("turn_id") or "").strip())
 
     def test_stream_success_persists_answer_same_turn_id(self) -> None:
-        """Successful stream should append answer and keep query/answer turn_id一致."""
+        """Successful stream should append answer with the same turn id."""
         with patch(
             "app.ui.gradio_persistence.get_redis_for_gradio",
             return_value=(self.redis_client, self.redis_settings),
@@ -129,7 +146,7 @@ class GradioChatHandlerTests(unittest.TestCase):
                         memory_rounds=3,
                     )
                 )
-        self.assertIn("[错误] boom", states[-1][-1]["content"])
+        self.assertIn("[Error] boom", states[-1][-1]["content"])
         rows = self.store.get_messages(self.session_id, "u1")
         self.assertNotIn("answer", [str(r.get("type")) for r in rows])
 
@@ -175,32 +192,38 @@ class GradioLayoutRequestForwardingTests(unittest.TestCase):
             observed["clear"] = request
             return [], "", session_id
 
-        blocks = GradioLayoutService.build_blocks(
-            page_title="x",
-            header_html="x",
-            theme_key="minimal",
-            on_load=_on_load,
-            on_user_turn=_on_user_turn,
-            on_stream_assistant=_on_stream_assistant,
-            on_clear_chat=_on_clear_chat,
-        )
-        request_stub = object()
+        # Gradio may create asyncio loops during block wiring; suppress known ResourceWarning noise.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            blocks = GradioLayoutService.build_blocks(
+                page_title="x",
+                theme_key="minimal",
+                backend_label="DeepSeek",
+                model_label="deepseek-chat",
+                user_label="local-dev",
+                on_load=_on_load,
+                on_user_turn=_on_user_turn,
+                on_stream_assistant=_on_stream_assistant,
+                on_clear_chat=_on_clear_chat,
+            )
+            request_stub = object()
 
-        for _, wrapped in blocks.fns.items():
-            name = wrapped.fn.__name__
-            if name == "_on_load_wrapped":
-                wrapped.fn(request_stub)
-            elif name == "_on_user_turn_wrapped":
-                wrapped.fn("hello", [], "sid", request_stub)
-            elif name == "_on_stream_assistant_wrapped":
-                list(wrapped.fn([], "sid", request_stub))
-            elif name == "_on_clear_chat_wrapped":
-                wrapped.fn("sid", request_stub)
+            for _, wrapped in blocks.fns.items():
+                name = wrapped.fn.__name__
+                if name == "_on_load_wrapped":
+                    wrapped.fn(request_stub)
+                elif name == "_on_user_turn_wrapped":
+                    wrapped.fn("hello", [], "sid", request_stub)
+                elif name == "_on_stream_assistant_wrapped":
+                    list(wrapped.fn([], "sid", request_stub))
+                elif name == "_on_clear_chat_wrapped":
+                    wrapped.fn("sid", request_stub)
 
         self.assertIs(observed.get("load"), request_stub)
         self.assertIs(observed.get("user_turn"), request_stub)
         self.assertIs(observed.get("stream"), request_stub)
         self.assertIs(observed.get("clear"), request_stub)
+        _close_stray_asyncio_event_loops()
 
 
 if __name__ == "__main__":

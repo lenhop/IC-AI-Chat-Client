@@ -356,6 +356,16 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 设计对照图见 `tasks/` 下 `商务风格 *.png`、`温馨风格 *.png`（风格对标，非像素级还原）。
 
+### 5.1 v3.7 客户端布局（实现基线）
+
+- 主标题固定为 `IC-AI-Chat Client`，仅标题条使用深蓝背景（`#0d47a1`）。
+- 标题下方为左右分栏：
+  - 左侧元信息：`Backend`、`Model`、`User`、`Session ID`（Session ID 位于 User 下方）。
+  - 右侧聊天区：可滚动消息列表 + 底部输入框与 `Send`、`Clear conversation` 按钮。
+- 页面不展示 `Configuration`、`Dialog` 这类区块标题。
+- 静态视觉参考：`demos/client_layout_v3.7_demo.html`。
+- 小屏（<=768px）自动堆叠为“元信息在上、聊天在下”。
+
 ---
 
 ## 6. 在外部项目中集成（Python）
@@ -606,6 +616,7 @@ START_LLM_SERVICE=0 ./scripts/start_uvicorn.sh
   开发阶段仍推荐 `uvicorn app.main:app --reload`。Worker 数与超时需按 LLM 流式耗时调整。
 - **健康检查**：可对外暴露 FastAPI 自带 `GET /docs` 或自建 `/health`（按需添加路由）。
 - **单元测试**：在项目根执行 `python -m unittest discover -s tests -p 'test_*.py'`（含 `test_llm_transport`、`test_turn_lifecycle`、`test_main_routes`、`test_session_store`、`test_message_ingress`、`test_ui_ingress_api`、`test_config_v35` 等；fakeredis，无 live LLM）。
+- **UI 自动化 / E2E（建议）**：当前以 `unittest` 与路由/服务层为主；Gradio 布局与 CSS 若需防回归，可后续引入浏览器 E2E（例如 Playwright）或截图/快照对比，以降低 Gradio 大版本升级带来的无感退化风险。
 
 ---
 
@@ -631,6 +642,7 @@ app/
   ui/
     gradio_chat.py           # Facade：统一构建与挂载 Gradio UI
     gradio_layout.py         # 页面结构与组件装配
+    chat_history_normalize.py  # Chatbot 消息行归一化（layout / handlers 共用）
     gradio_handlers.py       # 输入/流式回调/异常处理
     gradio_persistence.py    # session 与 Redis 持久化
     gradio_session_turn.py   # Starlette 会话中的活跃 turn_id

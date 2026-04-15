@@ -1,6 +1,9 @@
 """
 Gradio ``Theme`` presets for m1_plan_v3: business (default), warm, minimal.
 
+Legacy ``theme_header_html`` (Chinese banners) was removed in v3.7; the live UI
+uses ``gradio_layout`` + CSS (``theme_extra_css``) instead.
+
 Visual intent (not pixel-perfect vs reference PNGs in ``tasks/``):
 - business: cool slate/blue, crisp cards, professional density.
 - warm: soft rose/stone gradient, larger radius, friendly tone.
@@ -12,8 +15,6 @@ from __future__ import annotations
 from typing import Literal
 
 import gradio as gr
-
-from app.config import AppConfig
 
 GradioUiTheme = Literal["business", "warm", "minimal"]
 
@@ -78,44 +79,6 @@ def build_gradio_theme(theme: GradioUiTheme) -> gr.Theme:
             button_primary_background_fill="#2563eb",
             button_primary_background_fill_hover="#1d4ed8",
         )
-    )
-
-
-def theme_header_html(cfg: AppConfig, theme: GradioUiTheme) -> str:
-    """Top banner HTML aligned with the selected visual family."""
-    model_label = (
-        cfg.deepseek_llm_model if cfg.llm_backend == "deepseek" else cfg.ollama_generate_model
-    )
-    if theme == "business":
-        return f"""
-<div style="padding:14px 18px;margin-bottom:12px;border-radius:10px;background:linear-gradient(90deg,#1e40af 0%,#2563eb 100%);color:#fff;
-  box-shadow:0 4px 14px rgba(37,99,235,0.25);font-family:system-ui,Segoe UI,sans-serif;">
-  <div style="font-size:1.05rem;font-weight:650;letter-spacing:0.02em;">IC-AI Chat · 商务工作台</div>
-  <div style="opacity:0.92;font-size:0.88rem;margin-top:6px;">
-    后端 <code style="background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:4px;">{cfg.llm_backend}</code>
-    · 模型 <code style="background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:4px;">{model_label}</code>
-    · 用户 <code style="background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:4px;">{cfg.user_id}</code>
-  </div>
-  <div style="opacity:0.85;font-size:0.82rem;margin-top:8px;">主入口：<a href="/gradio" style="color:#bfdbfe;">/gradio</a></div>
-</div>
-"""
-    if theme == "warm":
-        return f"""
-<div style="padding:16px 18px;margin-bottom:14px;border-radius:16px;background:linear-gradient(120deg,#fff1f2,#fff7ed);
-  border:1px solid #fecdd3;box-shadow:0 6px 24px rgba(251,113,133,0.12);font-family:Nunito,system-ui,sans-serif;">
-  <div style="font-size:1.08rem;font-weight:700;color:#9f1239;">今天想聊点什么？</div>
-  <div style="color:#57534e;font-size:0.9rem;margin-top:8px;line-height:1.5;">
-    <span style="background:#ffe4e6;color:#be123c;padding:2px 8px;border-radius:999px;font-size:0.78rem;">{cfg.llm_backend}</span>
-    &nbsp;·&nbsp;模型 {model_label}
-    &nbsp;·&nbsp;{cfg.user_id}
-  </div>
-  <div style="margin-top:10px;font-size:0.82rem;"><a href="/gradio" style="color:#e11d48;">Gradio 主界面</a></div>
-</div>
-"""
-    # minimal
-    return (
-        f"**后端** `{cfg.llm_backend}` · **模型** `{model_label}` · **用户** `{cfg.user_id}`  \n"
-        "主入口：[打开 `/gradio`](/gradio)"
     )
 
 
@@ -189,6 +152,180 @@ def theme_extra_css(theme: GradioUiTheme) -> str:
 .icai-chat-root .block.gr-chatbot .wrap {
   width: 100% !important;
   max-width: 100% !important;
+}
+
+/* ----- v3.7 layout: title bar + two columns ----- */
+.icai-chat-root {
+  gap: 0 !important;
+}
+.icai-title-container {
+  margin: 0 !important;
+  margin-bottom: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  width: 100% !important;
+  max-width: 100% !important;
+}
+.icai-title-container > div,
+.icai-title-container .html-container,
+.icai-title-container .prose {
+  border: none !important;
+  padding: 0 !important;
+  background: transparent !important;
+}
+.icai-client-title-bar {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 14px 20px;
+  box-sizing: border-box;
+  background: #0d47a1;
+  color: #ffffff;
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 0;
+  border: none;
+}
+.icai-main-row {
+  gap: 0 !important;
+  min-height: calc(100vh - 160px);
+}
+.icai-sidebar {
+  background: #ffffff;
+  border-right: 1px solid #e2e8f0;
+  padding: 16px 18px;
+}
+.icai-meta-field {
+  margin-bottom: 10px !important;
+}
+/* Sidebar metadata: Markdown blocks (no bordered Textbox) */
+.icai-sidebar .icai-meta-md.block {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 0 12px 0 !important;
+}
+.icai-sidebar .icai-meta-md .prose,
+.icai-sidebar .icai-meta-md .wrap {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.icai-sidebar .icai-meta-md p {
+  margin: 0.2rem 0 0 0 !important;
+  font-size: 0.9375rem;
+  color: #111827;
+}
+.icai-sidebar .icai-meta-md strong {
+  font-weight: 600;
+  color: #374151;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.icai-session-md code {
+  font-size: 0.82rem !important;
+  word-break: break-all;
+}
+.icai-chat-panel {
+  background: #ffffff;
+  min-height: 0 !important;
+  padding: 16px;
+}
+.icai-chat-panel .gr-chatbot,
+.icai-chat-panel .icai-dialog-box {
+  min-height: 360px !important;
+  max-height: calc(100vh - 280px) !important;
+}
+.icai-chat-input {
+  margin-top: 12px !important;
+}
+.icai-chat-actions {
+  gap: 12px !important;
+  margin-top: 8px !important;
+}
+
+/* ----- Chatbot: single bubble layer (no inner bordered card) ----- */
+/*
+ * Gradio bubble layout stacks: (1) block chrome on .gr-chatbot, (2) .bot/.user bubble,
+ * (3) optional .message-bubble-border (scoped hash changes across builds — use [class*=]).
+ * We keep one visible layer: strip (1) and (3), flatten inner wrappers under .bot/.user.
+ */
+.icai-chat-panel .block.gr-chatbot,
+.icai-chat-panel .block.gr-chatbot > .wrap {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+/* Inner markdown frame: remove second border (hash-suffix safe). */
+.icai-chat-panel .message-wrap [class*="message-bubble-border"],
+.icai-chat-panel .gr-chatbot [class*="message-bubble-border"] {
+  border: none !important;
+  border-width: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  outline: none !important;
+}
+/* Selectable wrapper between .bot and .message-content: no extra card. */
+.icai-chat-panel .message-row.bubble .bot > div:not(.avatar-container),
+.icai-chat-panel .message-row.bubble .user > div:not(.avatar-container) {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+.icai-chat-panel .message-wrap .prose.chatbot.md,
+.icai-chat-panel .message-wrap .prose.md,
+.icai-chat-panel .gr-chatbot .prose.chatbot.md,
+.icai-chat-panel .gr-chatbot .prose.md {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  opacity: 1 !important;
+}
+.icai-chat-panel .message-wrap .bot .md,
+.icai-chat-panel .message-wrap .user .md,
+.icai-chat-panel .gr-chatbot .bot .md,
+.icai-chat-panel .gr-chatbot .user .md {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+/* Collapse extra full-width panels inside a message row (bubble layout) */
+.icai-chat-panel .message-wrap .message-row .panel,
+.icai-chat-panel .message-wrap .panel-full-width {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+/* MessageContent root: no nested fill (markdown code blocks keep their own chrome). */
+.icai-chat-panel .message-wrap .bot .message-content,
+.icai-chat-panel .message-wrap .user .message-content,
+.icai-chat-panel .gr-chatbot .bot .message-content,
+.icai-chat-panel .gr-chatbot .user .message-content {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+@media (max-width: 768px) {
+  .icai-main-row {
+    flex-direction: column !important;
+  }
+  .icai-sidebar {
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .icai-chat-panel .gr-chatbot,
+  .icai-chat-panel .icai-dialog-box {
+    max-height: 60vh !important;
+  }
 }
 """
     if theme == "business":
